@@ -87,6 +87,21 @@ rm ~/.config/opencode/plugins/opencode-redact.js
   variable, no per-rule enable/disable, no allowlist.
 - **Hook ordering relative to other `tool.execute.after` plugins is
   undefined** — opencode runs hooks sequentially in registration order.
+- **Live streaming preview is not redacted.** opencode's `bash` tool
+  (`src/tool/shell.ts`) streams stdout chunk-by-chunk into a live preview
+  field (`ctx.metadata({ metadata: { output: ... } })`) as the command runs,
+  and this is what a human watching the TUI in real time sees — entirely
+  separate from, and populated *before*, the final `tool.execute.after`
+  hook this plugin uses. Confirmed by direct testing (2026-09-04): a
+  previously-unseen randomly generated secret, read back through `cat`,
+  never reached the model (only `***REDACTED:aws***` was ever visible in
+  the conversation/tool-result history — the value the LLM provider
+  actually receives), but the live terminal-style rendering in the TUI can
+  still show raw output while a command is executing. **This is a
+  human-visible-only gap, not a model/provider leak** — the redaction
+  guarantee this plugin makes (secrets don't reach the LLM or persist in
+  replayed conversation history) still holds; only a live-updating visual
+  preview during execution is unaffected.
 
 ## Development
 
