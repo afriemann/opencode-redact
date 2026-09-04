@@ -23,6 +23,8 @@ place — before that output is appended to the LLM's context.
 - **Fails loud** at plugin startup if the secretlint rule configuration cannot
   load — this is the one point where a failure is not silent.
 
+<img width="1453" height="657" alt="image" src="https://github.com/user-attachments/assets/ad1235e2-dfd8-4c25-9f6a-db7fc8ec1182" />
+
 See `openspec/changes/add-secret-redaction-plugin/` (or, once archived,
 `openspec/specs/tool-output-redaction/spec.md`) for the full behavior
 contract, and `design.md` for the implementation rationale.
