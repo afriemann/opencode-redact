@@ -1,0 +1,24 @@
+{
+  "name": "opencode-redact",
+  "version": "0.1.0",
+  "description": "opencode plugin that redacts secrets from tool output before it reaches the LLM.",
+  "type": "module",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.15.0"
+  },
+  "dependencies": {
+    "@secretlint/config-loader": "^13.0.5",
+    "@secretlint/core": "^13.0.5",
+    "@secretlint/secretlint-rule-preset-recommend": "^13.0.5"
+  },
+  "devDependencies": {
+    "vitest": "^5.0.0"
+  }
+}
