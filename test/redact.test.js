@@ -1,3 +1,5 @@
+// spec: openspec/specs/tool-output-redaction/spec.md
+// spec: openspec/changes/add-user-message-redaction/specs/user-message-redaction/spec.md
 import { describe, it, expect, vi } from "vitest";
 import { RULE_FIXTURES } from "./fixtures.js";
 import {

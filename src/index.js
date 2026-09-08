@@ -116,9 +116,11 @@ export default async function OpencodeRedact({ client }, testOverrides = {}) {
         }
 
         const sortedRuleIds = [...unionedRuleIds].sort();
+        let annotationAppended = false;
 
         try {
           lastRedactedPart.text += `\n\n${buildUserMessageAnnotation(total, sortedRuleIds)}`;
+          annotationAppended = true;
         } catch (err) {
           await logSafely(
             client,
@@ -130,7 +132,8 @@ export default async function OpencodeRedact({ client }, testOverrides = {}) {
         await logSafely(
           client,
           "warn",
-          `redacted ${total} secret(s) across user message parts (rules: ${sortedRuleIds.join("+")})`,
+          `redacted ${total} secret(s) across user message parts (rules: ${sortedRuleIds.join("+")})` +
+            (annotationAppended ? "" : " — annotation append failed, see preceding error log"),
         );
       } catch (err) {
         await logSafely(client, "error", `chat.message redaction handler failed: ${err?.message ?? err}`);

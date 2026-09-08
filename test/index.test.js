@@ -1,3 +1,5 @@
+// spec: openspec/specs/tool-output-redaction/spec.md
+// spec: openspec/changes/add-user-message-redaction/specs/user-message-redaction/spec.md
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, it, expect, vi } from "vitest";
@@ -182,6 +184,19 @@ describe("chat.message handler", () => {
     expect(annotationMatches).toHaveLength(1);
   });
 
+  it("appends the annotation to the actual last redacted part, not merely the last part in the array", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    const redacted = textPart(`aws_secret_access_key=${AWS_SECRET}`);
+    const clean = textPart("nothing sensitive here");
+    const output = { message: {}, parts: [redacted, clean] };
+    await hooks["chat.message"]({ sessionID: "s1" }, output);
+
+    expect(redacted.text).toContain("***REDACTED:");
+    expect(redacted.text).toContain("[opencode-redact]");
+    expect(clean.text).toBe("nothing sensitive here");
+  });
+
   it("never logs the matched secret text, only the aggregated count and rule ids", async () => {
     const client = fakeClient();
     const hooks = await OpencodeRedact({ client });
@@ -255,5 +270,37 @@ describe("chat.message handler", () => {
     await expect(hooks["chat.message"]({ sessionID: "s1" }, output)).resolves.toBeUndefined();
     expect(part.text).toBe(text);
     expect(client.app.log).not.toHaveBeenCalled();
+  });
+
+  it("resolves without rejecting when the annotation-append write throws, leaving the initial redaction intact", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    let value = `aws_secret_access_key=${AWS_SECRET}`;
+    let writes = 0;
+    // A part whose text setter succeeds for the initial redaction write but
+    // throws on the second write (the annotation append's `+=`), exercising
+    // the third D7 try/catch layer specifically — distinct from the frozen-
+    // part test above, which fails on the FIRST write and never reaches the
+    // annotation-append step at all.
+    const part = {
+      type: "text",
+      get text() {
+        return value;
+      },
+      set text(v) {
+        writes += 1;
+        if (writes === 2) {
+          throw new Error("second write boom");
+        }
+        value = v;
+      },
+    };
+    const output = { message: {}, parts: [part] };
+    await expect(hooks["chat.message"]({ sessionID: "s1" }, output)).resolves.toBeUndefined();
+    expect(part.text).toContain("***REDACTED:");
+    expect(part.text).not.toContain("[opencode-redact]");
+    expect(writes).toBe(2);
+    const errorLogCall = client.app.log.mock.calls.find(([call]) => call.body.level === "error");
+    expect(errorLogCall[0].body.message).toContain("failed to append user-message redaction annotation");
   });
 });

@@ -26,6 +26,10 @@ const BASELINE_PATH = fileURLToPath(new URL("./__baseline__/redact-secrets.basel
 
 describe("redactSecrets refactor-safety baseline", () => {
   it("matches the committed pre-refactor baseline for every corpus entry", async () => {
+    // Reminder (see test/corpus.js's own header for the full rule): never
+    // edit an existing corpus entry or regenerate this baseline to make a
+    // failing assertion pass — a mismatch here is a regression to
+    // investigate and fix in the implementation, not in the fixture data.
     const baseline = JSON.parse(readFileSync(BASELINE_PATH, "utf8"));
     const config = await createSecretlintConfig();
     const realLint = createLinter(config);
