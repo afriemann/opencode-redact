@@ -8,6 +8,7 @@ import {
   spliceRedactions,
   shortRuleId,
   buildAnnotation,
+  scanAndRedact,
   redactSecrets,
 } from "../src/redact.js";
 
@@ -171,7 +172,55 @@ describe("buildAnnotation", () => {
   });
 });
 
+describe("scanAndRedact", () => {
+  it("returns the input unchanged and never calls lint for an empty string", async () => {
+    const lint = vi.fn();
+    const result = await scanAndRedact("", { lint });
+    expect(result).toEqual({ text: "", redactionCount: 0, ruleIds: [] });
+    expect(lint).not.toHaveBeenCalled();
+  });
+
+  it("returns the input unchanged and never calls lint for a non-string value", async () => {
+    const lint = vi.fn();
+    const result = await scanAndRedact(undefined, { lint });
+    expect(result).toEqual({ text: undefined, redactionCount: 0, ruleIds: [] });
+    expect(lint).not.toHaveBeenCalled();
+  });
+
+  it("returns the redacted text with NO annotation appended when a finding is redacted", async () => {
+    const text = "token: AAAAAAAAAAAAAAAAAAAA secret_value";
+    const start = text.indexOf("AAAAAAAAAAAAAAAAAAAA");
+    const end = start + "AAAAAAAAAAAAAAAAAAAA".length;
+    const lint = vi.fn().mockResolvedValue([{ ruleId: "@secretlint/secretlint-rule-example", range: [start, end] }]);
+    const result = await scanAndRedact(text, { lint });
+    expect(result.text).toContain("***REDACTED:example***");
+    expect(result.text).not.toContain("[opencode-redact]");
+    expect(result.redactionCount).toBe(1);
+    expect(result.ruleIds).toEqual(["example"]);
+  });
+
+  it("returns the original text unchanged when lint throws (fail open)", async () => {
+    const lint = vi.fn().mockRejectedValue(new Error("scanner exploded"));
+    const text = "aws_secret_access_key=AAAAAAAAAAAAAAAAAAAA";
+    const result = await scanAndRedact(text, { lint });
+    expect(result).toEqual({ text, redactionCount: 0, ruleIds: [] });
+  });
+});
+
 describe("redactSecrets", () => {
+  it("is scanAndRedact plus the tool-output annotation appended after a redaction", async () => {
+    const text = "token: AAAAAAAAAAAAAAAAAAAA secret_value";
+    const start = text.indexOf("AAAAAAAAAAAAAAAAAAAA");
+    const end = start + "AAAAAAAAAAAAAAAAAAAA".length;
+    const lint = vi.fn().mockResolvedValue([{ ruleId: "@secretlint/secretlint-rule-example", range: [start, end] }]);
+    const scanned = await scanAndRedact(text, { lint });
+    const redacted = await redactSecrets(text, { lint });
+    expect(redacted.text).toBe(`${scanned.text}\n\n${buildAnnotation(scanned.redactionCount, scanned.ruleIds)}`);
+    expect(redacted.redactionCount).toBe(scanned.redactionCount);
+    expect(redacted.ruleIds).toEqual(scanned.ruleIds);
+  });
+
+
   it("returns the input unchanged and never calls lint for an empty string", async () => {
     const lint = vi.fn();
     const result = await redactSecrets("", { lint });

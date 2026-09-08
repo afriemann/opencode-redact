@@ -1,13 +1,13 @@
 ## 1. Refactor-safety proof (must land before src/redact.js changes)
 
-- [ ] 1.1 Add `test/corpus.js` exporting the deterministic fixture corpus (all `RULE_FIXTURES` entries with `ext`, `GCP_JSON_FIXTURE`, and existing ad-hoc inputs from `test/redact.test.js`/`test/index.test.js` — clean text, `""`, `undefined`, non-string, multi-finding, overlapping-range, adjacent-in-token, partial-range, malformed-range cases) and verify it can be imported without errors.
-- [ ] 1.2 Write a one-shot generator script that runs every corpus entry through the current (unmodified) `redactSecrets` and writes `test/__baseline__/redact-secrets.baseline.json` with `{ input, ext, text, redactionCount, ruleIds }` per entry; run it and commit the generated baseline before any `src/redact.js` edit.
-- [ ] 1.3 Add a permanent vitest test that loads the baseline and asserts `deepStrictEqual` of `await redactSecrets(input, { lint })` against each baseline entry (including `ruleIds` order); verify it passes against the unmodified code.
+- [x] 1.1 Add `test/corpus.js` exporting the deterministic fixture corpus (all `RULE_FIXTURES` entries with `ext`, `GCP_JSON_FIXTURE`, and existing ad-hoc inputs from `test/redact.test.js`/`test/index.test.js` — clean text, `""`, `undefined`, non-string, multi-finding, overlapping-range, adjacent-in-token, partial-range, malformed-range cases) and verify it can be imported without errors.
+- [x] 1.2 Write a one-shot generator script that runs every corpus entry through the current (unmodified) `redactSecrets` and writes `test/__baseline__/redact-secrets.baseline.json` with `{ input, ext, text, redactionCount, ruleIds }` per entry; run it and commit the generated baseline before any `src/redact.js` edit.
+- [x] 1.3 Add a permanent vitest test that loads the baseline and asserts `deepStrictEqual` of `await redactSecrets(input, { lint })` against each baseline entry (including `ruleIds` order); verify it passes against the unmodified code.
 
 ## 2. Extract scanAndRedact (behavior-preserving refactor)
 
-- [ ] 2.1 Extract the detect-merge-splice body of `redactSecrets()` into `scanAndRedact(text, { lint })` returning `{ text, redactionCount, ruleIds }` with no annotation appended, preserving the exact early-exit return value for non-string/empty/prescreen-negative inputs; verify the full existing `test/redact.test.js` and `test/index.test.js` suites still pass unmodified.
-- [ ] 2.2 Reduce `redactSecrets()` to call `scanAndRedact` then append `\n\n` + `buildAnnotation(count, ruleIds)` only when `redactionCount > 0`; verify the Task 1.3 baseline assertion test passes with zero edits to the baseline file.
+- [x] 2.1 Extract the detect-merge-splice body of `redactSecrets()` into `scanAndRedact(text, { lint })` returning `{ text, redactionCount, ruleIds }` with no annotation appended, preserving the exact early-exit return value for non-string/empty/prescreen-negative inputs; verify the full existing `test/redact.test.js` and `test/index.test.js` suites still pass unmodified.
+- [x] 2.2 Reduce `redactSecrets()` to call `scanAndRedact` then append `\n\n` + `buildAnnotation(count, ruleIds)` only when `redactionCount > 0`; verify the Task 1.3 baseline assertion test passes with zero edits to the baseline file.
 
 ## 3. Fence grammar (splitNoRedactSegments)
 

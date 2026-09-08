@@ -239,16 +239,24 @@ export function buildAnnotation(count, ruleIds) {
 }
 
 /**
- * Orchestrates the full detect -> merge -> splice pipeline. `lint` is
- * injected so this function is testable with a stub and, through the same
- * seam, integration-testable with the real secretlint linter.
+ * Orchestrates the full detect -> merge -> splice pipeline, WITHOUT
+ * appending any model-facing annotation. `lint` is injected so this
+ * function is testable with a stub and, through the same seam,
+ * integration-testable with the real secretlint linter.
  *
  * Returns `{ text, redactionCount, ruleIds }` — `text` is the original
- * string unchanged whenever nothing is redacted (including on a scanner
- * error, per the fail-open contract), or the redacted string plus a
- * trailing annotation when at least one finding was merged and spliced.
+ * value unchanged whenever nothing is redacted (including on a scanner
+ * error, per the fail-open contract; this may be a non-string value such as
+ * `undefined`, which is intentionally returned as-is, not coerced), or the
+ * redacted string when at least one finding was merged and spliced.
+ *
+ * Annotation-free by design: two callers build different annotations on top
+ * of this shared core — `redactSecrets` (tool output) and
+ * `redactUserMessage` (user messages, which additionally applies the
+ * `noredact` fence exemption and aggregates across message parts). See
+ * design.md D1.
  */
-export async function redactSecrets(text, { lint }) {
+export async function scanAndRedact(text, { lint }) {
   if (typeof text !== "string" || text.length === 0 || !looksLikeSecret(text)) {
     return { text, redactionCount: 0, ruleIds: [] };
   }
@@ -268,7 +276,25 @@ export async function redactSecrets(text, { lint }) {
 
   const redacted = spliceRedactions(text, merged);
   const ruleIds = [...new Set(merged.flatMap((interval) => [...interval.ruleIds].map(shortRuleId)))];
-  const annotated = `${redacted}\n\n${buildAnnotation(merged.length, ruleIds)}`;
 
-  return { text: annotated, redactionCount: merged.length, ruleIds };
+  return { text: redacted, redactionCount: merged.length, ruleIds };
+}
+
+/**
+ * Thin wrapper around `scanAndRedact` for the tool-output redaction path:
+ * appends the tool-output annotation after all redaction placeholders when
+ * at least one finding was redacted. Behavior-preserving by construction —
+ * see the refactor-safety baseline in test/redact-baseline.test.js.
+ */
+export async function redactSecrets(text, { lint }) {
+  const result = await scanAndRedact(text, { lint });
+  if (result.redactionCount === 0) {
+    return result;
+  }
+
+  return {
+    text: `${result.text}\n\n${buildAnnotation(result.redactionCount, result.ruleIds)}`,
+    redactionCount: result.redactionCount,
+    ruleIds: result.ruleIds,
+  };
 }
