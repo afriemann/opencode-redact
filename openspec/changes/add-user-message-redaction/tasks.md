@@ -17,8 +17,8 @@
 
 ## 4. redactUserMessage and annotation
 
-- [ ] 4.1 Implement `redactUserMessage(text, { lint })`: whole-text `looksLikeSecret` fast path, then `splitNoRedactSegments`, then `scanAndRedact` on each non-exempt segment, concatenating results in order, summing `redactionCount`, and unioning+sorting `ruleIds`; returns no annotation; verify unit tests cover a fenced checksum example that would otherwise false-positive-trigger a rule, proving the exemption works end-to-end.
-- [ ] 4.2 Implement `buildUserMessageAnnotation(count, ruleIds)` using the design.md-proposed wording (mirrors `buildAnnotation`'s tone, states the user typed and it was redacted on purpose, instructs not to reconstruct/guess the value, contains no mention of the `noredact` fence or any bypass mechanism); verify a unit test asserts the string contains no occurrence of "noredact".
+- [x] 4.1 Implement `redactUserMessage(text, { lint })`: whole-text `looksLikeSecret` fast path, then `splitNoRedactSegments`, then `scanAndRedact` on each non-exempt segment, concatenating results in order, summing `redactionCount`, and unioning+sorting `ruleIds`; returns no annotation; verify unit tests cover a fenced checksum example that would otherwise false-positive-trigger a rule, proving the exemption works end-to-end.
+- [x] 4.2 Implement `buildUserMessageAnnotation(count, ruleIds)` using the design.md-proposed wording (mirrors `buildAnnotation`'s tone, states the user typed and it was redacted on purpose, instructs not to reconstruct/guess the value, contains no mention of the `noredact` fence or any bypass mechanism); verify a unit test asserts the string contains no occurrence of "noredact".
 
 ## 5. chat.message hook
 

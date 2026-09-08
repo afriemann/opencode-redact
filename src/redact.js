@@ -406,3 +406,73 @@ export async function redactSecrets(text, { lint }) {
     ruleIds: result.ruleIds,
   };
 }
+
+/**
+ * Orchestrates redaction for a single user-authored (non-synthetic) text
+ * part: a whole-text `looksLikeSecret` fast path (sound because every
+ * anchor is a substring/regex match, so no anchor in the whole text implies
+ * none in any substring — design.md D5), then `splitNoRedactSegments` to
+ * honor the `noredact` fence, then `scanAndRedact` on each non-exempt
+ * segment. Exempt segments pass through byte-identical. Results are
+ * concatenated in source order; `redactionCount` is summed and `ruleIds`
+ * is the de-duplicated, sorted union across all scanned segments.
+ *
+ * Deliberately annotation-free (like `scanAndRedact`) — only the
+ * `chat.message` hook, which sees every part of a message, can aggregate a
+ * single annotation across parts. See `buildUserMessageAnnotation` and
+ * design.md D1/D6.
+ */
+export async function redactUserMessage(text, { lint }) {
+  if (typeof text !== "string" || text.length === 0 || !looksLikeSecret(text)) {
+    return { text, redactionCount: 0, ruleIds: [] };
+  }
+
+  const segments = splitNoRedactSegments(text);
+  const resultParts = [];
+  let redactionCount = 0;
+  const ruleIdSet = new Set();
+
+  for (const segment of segments) {
+    if (segment.exempt) {
+      resultParts.push(segment.text);
+      continue;
+    }
+    const scanned = await scanAndRedact(segment.text, { lint });
+    resultParts.push(scanned.text);
+    redactionCount += scanned.redactionCount;
+    for (const ruleId of scanned.ruleIds) {
+      ruleIdSet.add(ruleId);
+    }
+  }
+
+  return {
+    text: resultParts.join(""),
+    redactionCount,
+    ruleIds: [...ruleIdSet].sort(),
+  };
+}
+
+/**
+ * Builds the model-facing note appended once per user message when at
+ * least one redaction occurred across its parts. Unlike `buildAnnotation`
+ * (tool output, where the model is told to ask the user for the value),
+ * this note addresses a redaction of the user's OWN message — re-asking
+ * would loop or coach the model toward soliciting a bypass, so it instead
+ * instructs the model to say so and stop. Deliberately makes NO mention of
+ * the `noredact` fence or any exemption mechanism (design.md's user
+ * decision on annotation content) — teaching the model such a convention
+ * would teach it a documented bypass of this security control, since
+ * `chat.message` also fires for messages the model itself authored (e.g.
+ * subagent/task-tool prompts).
+ */
+export function buildUserMessageAnnotation(count, ruleIds) {
+  const labels = [...new Set(ruleIds)].sort().join("+");
+  return (
+    `[opencode-redact] ${count} secret(s) in this user message were detected and replaced ` +
+    `with ***REDACTED:...*** placeholders (rules: ${labels}). A placeholder is NOT the ` +
+    `real value and is NOT part of what the user typed. Never write, copy, echo, or commit ` +
+    `a ***REDACTED:...*** placeholder into a file, command, or message — doing so would ` +
+    `overwrite real content with this marker. Do not attempt to recover, reconstruct, or ` +
+    `guess a redacted value; if the task cannot proceed without it, say so and stop.`
+  );
+}
