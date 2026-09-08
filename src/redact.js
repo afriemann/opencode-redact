@@ -221,6 +221,114 @@ export function spliceRedactions(text, mergedIntervals) {
   return parts.join("");
 }
 
+// Opening fence line: 0-3 leading spaces, a run of 3+ backticks, then an
+// info string that (after trimming spaces/tabs) is checked to be exactly
+// "noredact" — see the token check below. See design.md D4.
+const OPEN_FENCE_LINE_PATTERN = /^[ ]{0,3}(`{3,})[ \t]*([^\s]*)[ \t]*$/;
+
+/**
+ * Returns the opening fence's backtick-run length when `lineContent`
+ * (a single line, terminator already stripped) is a valid noredact opening
+ * fence line, or `null` otherwise. The info-string token is required to be
+ * exactly "noredact", ASCII case-insensitive — matched with an explicit
+ * `[A-Za-z]` check (not a Unicode-aware `toLowerCase`) so a homoglyph or
+ * case-folding trick cannot open a fence (design.md D4 row 5).
+ */
+function matchOpenFence(lineContent) {
+  const match = OPEN_FENCE_LINE_PATTERN.exec(lineContent);
+  if (!match) {
+    return null;
+  }
+  const [, backticks, token] = match;
+  if (!/^[A-Za-z]+$/.test(token) || token.toLowerCase() !== "noredact") {
+    return null;
+  }
+  return backticks.length;
+}
+
+/**
+ * Returns true when `lineContent` is a valid closing fence line for an
+ * opening run of exactly `fenceLength` backticks. The closer's backtick run
+ * must match the opener's length EXACTLY (not CommonMark's "closer >=
+ * opener") — see design.md D4 row 1.
+ */
+function matchCloseFence(lineContent, fenceLength) {
+  const pattern = new RegExp(`^[ ]{0,3}\`{${fenceLength}}[ \\t]*$`);
+  return pattern.test(lineContent);
+}
+
+// Strips exactly one trailing line terminator (`\n`, optionally preceded by
+// `\r`) from a line for grammar-matching purposes only — the original line,
+// terminator included, is always what gets appended to a buffer/segment, so
+// reassembly is byte-identical (design.md D4 row 6, D5 invariant 1).
+function stripLineTerminatorForMatching(line) {
+  return line.replace(/\r?\n$/, "");
+}
+
+/**
+ * Splits `text` into an ordered array of `{ text, exempt }` segments per the
+ * noredact fence grammar (design.md D4). `exempt` segments are fully-formed
+ * fenced blocks (opening fence line through closing fence line inclusive)
+ * whose content must not be scanned; all other text is `exempt: false`.
+ *
+ * Two invariants hold for every input (design.md D5), both asserted as
+ * properties in test/redact.test.js:
+ *   1. Round-trip: `segments.map(s => s.text).join("") === text`.
+ *   2. No empty segments are ever emitted.
+ *
+ * An unterminated opening fence (no matching closer before EOF) is
+ * reclassified as non-exempt in its entirety, including the orphan opening
+ * fence line — nothing is dropped, nothing is exempted (fail-safe default).
+ */
+export function splitNoRedactSegments(text) {
+  if (typeof text !== "string" || text.length === 0) {
+    return [];
+  }
+
+  const lines = text.split(/(?<=\n)/);
+  const segments = [];
+
+  let plainBuffer = "";
+  let exemptBuffer = "";
+  let openFenceLength = null; // null when outside a fence
+
+  for (const line of lines) {
+    const matchContent = stripLineTerminatorForMatching(line);
+
+    if (openFenceLength === null) {
+      const fenceLength = matchOpenFence(matchContent);
+      if (fenceLength !== null) {
+        if (plainBuffer.length > 0) {
+          segments.push({ text: plainBuffer, exempt: false });
+          plainBuffer = "";
+        }
+        openFenceLength = fenceLength;
+        exemptBuffer = line;
+      } else {
+        plainBuffer += line;
+      }
+    } else if (matchCloseFence(matchContent, openFenceLength)) {
+      exemptBuffer += line;
+      segments.push({ text: exemptBuffer, exempt: true });
+      exemptBuffer = "";
+      openFenceLength = null;
+    } else {
+      exemptBuffer += line;
+    }
+  }
+
+  if (openFenceLength !== null) {
+    // Unterminated opening fence at EOF: reclassify the buffered content
+    // (including the orphan opening fence line) as non-exempt.
+    plainBuffer += exemptBuffer;
+  }
+  if (plainBuffer.length > 0) {
+    segments.push({ text: plainBuffer, exempt: false });
+  }
+
+  return segments;
+}
+
 /**
  * Builds the model-facing note appended after redaction, naming the
  * concrete prohibited action (writing a placeholder back) so the model does

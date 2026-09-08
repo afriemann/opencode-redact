@@ -11,9 +11,9 @@
 
 ## 3. Fence grammar (splitNoRedactSegments)
 
-- [ ] 3.1 Implement `splitNoRedactSegments(text)` per the design.md D4 grammar table (exact-length closing fence, backticks only, 0–3 space indentation, exact case-insensitive ASCII `noredact` info string, CRLF-preserving, EOF-without-newline closer accepted, unterminated fence reclassified as non-exempt, no nesting) and verify it returns `Array<{ text, exempt }>` in source order.
-- [ ] 3.2 Write property tests asserting the two D5 invariants over the whole fixture corpus: round-trip (`segments.map(s => s.text).join("") === text`) and no empty segments emitted; verify both hold for every corpus entry plus new fence-specific fixtures.
-- [ ] 3.3 Write one test case per row of the D4 grammar table (both the accepted and the rejected form for each ambiguous case), plus CRLF round-trip, multiple fences in one part, empty fence body, EOF-without-trailing-newline closer, unterminated opening fence, and early-close-by-inner-bare-fence; verify all pass.
+- [x] 3.1 Implement `splitNoRedactSegments(text)` per the design.md D4 grammar table (exact-length closing fence, backticks only, 0–3 space indentation, exact case-insensitive ASCII `noredact` info string, CRLF-preserving, EOF-without-newline closer accepted, unterminated fence reclassified as non-exempt, no nesting) and verify it returns `Array<{ text, exempt }>` in source order.
+- [x] 3.2 Write property tests asserting the two D5 invariants over the whole fixture corpus: round-trip (`segments.map(s => s.text).join("") === text`) and no empty segments emitted; verify both hold for every corpus entry plus new fence-specific fixtures.
+- [x] 3.3 Write one test case per row of the D4 grammar table (both the accepted and the rejected form for each ambiguous case), plus CRLF round-trip, multiple fences in one part, empty fence body, EOF-without-trailing-newline closer, unterminated opening fence, and early-close-by-inner-bare-fence; verify all pass.
 
 ## 4. redactUserMessage and annotation
 
