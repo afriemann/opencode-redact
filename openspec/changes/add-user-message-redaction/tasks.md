@@ -22,10 +22,10 @@
 
 ## 5. chat.message hook
 
-- [ ] 5.1 Register a `"chat.message"` hook in `src/index.js` sharing the existing `lint` instance; iterate `output.parts` filtering to `type === "text" && synthetic !== true && typeof text === "string" && text.length > 0`; verify a unit test confirms synthetic, non-text, empty, and non-string-text parts are skipped.
-- [ ] 5.2 For each qualifying part, call `redactUserMessage`; on `redactionCount > 0`, mutate `part.text` in place and accumulate the total count, union of rule ids, and a reference to the last redacted part; verify a unit test confirms in-place mutation and correct aggregation across a multi-part message.
-- [ ] 5.3 After processing all parts, if the aggregated total is `> 0`, append `buildUserMessageAnnotation(total, unionedRuleIds)` to the last redacted part's text and log via `logSafely` (count + rule ids only, never text); verify a unit test confirms exactly one annotation appears in a multi-part-redaction message and the log call contains no message text.
-- [ ] 5.4 Wrap the handler in the three-layer try/catch structure from design.md D7 (outer handler-wide, per-part inside the loop with continue-on-error, and around the annotation append), each calling `logSafely(client, "error", …)`; verify a test suite covers: missing `parts`, non-array `parts`, a throwing `output` getter, a throwing `part.type`/`part.text` getter, a frozen part, and a throwing `lint` — each resolves without rejecting and leaves input intact.
+- [x] 5.1 Register a `"chat.message"` hook in `src/index.js` sharing the existing `lint` instance; iterate `output.parts` filtering to `type === "text" && synthetic !== true && typeof text === "string" && text.length > 0`; verify a unit test confirms synthetic, non-text, empty, and non-string-text parts are skipped.
+- [x] 5.2 For each qualifying part, call `redactUserMessage`; on `redactionCount > 0`, mutate `part.text` in place and accumulate the total count, union of rule ids, and a reference to the last redacted part; verify a unit test confirms in-place mutation and correct aggregation across a multi-part message.
+- [x] 5.3 After processing all parts, if the aggregated total is `> 0`, append `buildUserMessageAnnotation(total, unionedRuleIds)` to the last redacted part's text and log via `logSafely` (count + rule ids only, never text); verify a unit test confirms exactly one annotation appears in a multi-part-redaction message and the log call contains no message text.
+- [x] 5.4 Wrap the handler in the three-layer try/catch structure from design.md D7 (outer handler-wide, per-part inside the loop with continue-on-error, and around the annotation append), each calling `logSafely(client, "error", …)`; verify a test suite covers: missing `parts`, non-array `parts`, a throwing `output` getter, a throwing `part.type`/`part.text` getter, a frozen part, and a throwing `lint` — each resolves without rejecting and leaves input intact.
 
 ## 6. Integration tests
 

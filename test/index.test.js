@@ -2,6 +2,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, it, expect, vi } from "vitest";
 import OpencodeRedact from "../src/index.js";
+import { RULE_FIXTURES } from "./fixtures.js";
 
 const SRC_DIR = fileURLToPath(new URL("../src/", import.meta.url));
 
@@ -31,10 +32,11 @@ describe("export surface", () => {
 });
 
 describe("plugin factory", () => {
-  it("resolves to an object exposing the tool.execute.after hook", async () => {
+  it("resolves to an object exposing the tool.execute.after and chat.message hooks", async () => {
     const client = fakeClient();
     const hooks = await OpencodeRedact({ client });
     expect(typeof hooks["tool.execute.after"]).toBe("function");
+    expect(typeof hooks["chat.message"]).toBe("function");
   });
 
   it("logs at error level and rethrows when the rule configuration fails to load", async () => {
@@ -95,5 +97,163 @@ describe("tool.execute.after handler", () => {
     for (const payload of loggedPayloads) {
       expect(payload).not.toContain(secret);
     }
+  });
+});
+
+describe("chat.message handler", () => {
+  const AWS_SECRET = "ZQ7mK4pXvB2nJ8wR5tL9cF3hD6yG1sA0uEZQ7mK4";
+
+  function textPart(text, overrides = {}) {
+    return { type: "text", text, ...overrides };
+  }
+
+  it("redacts a secret found in a non-synthetic text part and appends a single annotation", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    const part = textPart(`aws_secret_access_key=${AWS_SECRET}`);
+    const output = { message: {}, parts: [part] };
+    await hooks["chat.message"]({ sessionID: "s1" }, output);
+    expect(part.text).toContain("***REDACTED:");
+    expect(part.text).not.toContain(AWS_SECRET);
+    const annotationMatches = part.text.match(/\[opencode-redact\]/g) ?? [];
+    expect(annotationMatches).toHaveLength(1);
+    expect(client.app.log).toHaveBeenCalled();
+  });
+
+  it("leaves a noredact-fenced secret completely untouched", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    const fenced = `\`\`\`noredact\naws_secret_access_key=${AWS_SECRET}\n\`\`\``;
+    const part = textPart(fenced);
+    const output = { message: {}, parts: [part] };
+    await hooks["chat.message"]({ sessionID: "s1" }, output);
+    expect(part.text).toBe(fenced);
+    expect(client.app.log).not.toHaveBeenCalled();
+  });
+
+  it("skips a synthetic text part even when it contains a secret", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    const part = textPart(`aws_secret_access_key=${AWS_SECRET}`, { synthetic: true });
+    const output = { message: {}, parts: [part] };
+    await hooks["chat.message"]({ sessionID: "s1" }, output);
+    expect(part.text).toContain(AWS_SECRET);
+    expect(client.app.log).not.toHaveBeenCalled();
+  });
+
+  it("skips a non-text part (e.g. a file part) even when its text-like field contains a secret", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    const part = { type: "file", text: `aws_secret_access_key=${AWS_SECRET}` };
+    const output = { message: {}, parts: [part] };
+    await hooks["chat.message"]({ sessionID: "s1" }, output);
+    expect(part.text).toContain(AWS_SECRET);
+    expect(client.app.log).not.toHaveBeenCalled();
+  });
+
+  it("skips a part with empty text and a part with non-string text", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    const emptyPart = textPart("");
+    const nonStringPart = textPart(42);
+    const output = { message: {}, parts: [emptyPart, nonStringPart] };
+    await expect(hooks["chat.message"]({ sessionID: "s1" }, output)).resolves.toBeUndefined();
+    expect(emptyPart.text).toBe("");
+    expect(nonStringPart.text).toBe(42);
+    expect(client.app.log).not.toHaveBeenCalled();
+  });
+
+  it("aggregates redactions across multiple parts into exactly one annotation, appended to the last redacted part", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    const secretOne = "aws_secret_access_key=" + AWS_SECRET;
+    const secretTwo = RULE_FIXTURES.find((f) => f.rule === "privatekey").content;
+    const partOne = textPart(secretOne);
+    const clean = textPart("nothing sensitive here");
+    const partTwo = textPart(secretTwo);
+    const output = { message: {}, parts: [partOne, clean, partTwo] };
+    await hooks["chat.message"]({ sessionID: "s1" }, output);
+
+    expect(partOne.text).toContain("***REDACTED:");
+    expect(partOne.text).not.toContain("[opencode-redact]");
+    expect(clean.text).toBe("nothing sensitive here");
+    expect(partTwo.text).toContain("***REDACTED:");
+    const annotationMatches = partTwo.text.match(/\[opencode-redact\]/g) ?? [];
+    expect(annotationMatches).toHaveLength(1);
+  });
+
+  it("never logs the matched secret text, only the aggregated count and rule ids", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    const part = textPart(`aws_secret_access_key=${AWS_SECRET}`);
+    const output = { message: {}, parts: [part] };
+    await hooks["chat.message"]({ sessionID: "s1" }, output);
+    const loggedPayloads = client.app.log.mock.calls.map((call) => JSON.stringify(call[0]));
+    for (const payload of loggedPayloads) {
+      expect(payload).not.toContain(AWS_SECRET);
+    }
+  });
+
+  it("resolves without rejecting when parts is missing", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    const output = { message: {} };
+    await expect(hooks["chat.message"]({ sessionID: "s1" }, output)).resolves.toBeUndefined();
+  });
+
+  it("resolves without rejecting when parts is not an array", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    const output = { message: {}, parts: "not an array" };
+    await expect(hooks["chat.message"]({ sessionID: "s1" }, output)).resolves.toBeUndefined();
+  });
+
+  it("resolves without rejecting when reading output.parts throws", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    const output = {
+      message: {},
+      get parts() {
+        throw new Error("boom");
+      },
+    };
+    await expect(hooks["chat.message"]({ sessionID: "s1" }, output)).resolves.toBeUndefined();
+  });
+
+  it("continues past a single poisoned part (throwing getter) and still redacts the remaining parts", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    const poisoned = {
+      get type() {
+        throw new Error("type boom");
+      },
+    };
+    const good = textPart(`aws_secret_access_key=${AWS_SECRET}`);
+    const output = { message: {}, parts: [poisoned, good] };
+    await expect(hooks["chat.message"]({ sessionID: "s1" }, output)).resolves.toBeUndefined();
+    expect(good.text).toContain("***REDACTED:");
+  });
+
+  it("resolves without rejecting when a part is frozen, leaving its text unchanged", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    const frozen = Object.freeze(textPart(`aws_secret_access_key=${AWS_SECRET}`));
+    const output = { message: {}, parts: [frozen] };
+    await expect(hooks["chat.message"]({ sessionID: "s1" }, output)).resolves.toBeUndefined();
+    expect(frozen.text).toContain(AWS_SECRET);
+  });
+
+  it("fails open (no rejection, text unchanged) when the injected linter throws", async () => {
+    const client = fakeClient();
+    const throwingLinter = () => async () => {
+      throw new Error("scanner exploded");
+    };
+    const hooks = await OpencodeRedact({ client }, { _createLinterOverride: throwingLinter });
+    const text = `aws_secret_access_key=${AWS_SECRET}`;
+    const part = textPart(text);
+    const output = { message: {}, parts: [part] };
+    await expect(hooks["chat.message"]({ sessionID: "s1" }, output)).resolves.toBeUndefined();
+    expect(part.text).toBe(text);
+    expect(client.app.log).not.toHaveBeenCalled();
   });
 });
