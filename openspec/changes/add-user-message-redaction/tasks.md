@@ -29,10 +29,10 @@
 
 ## 6. Integration tests
 
-- [ ] 6.1 Add `test/index.test.js` coverage for the real end-to-end `chat.message` flow: a text part containing a real fixture secret outside a fence is redacted and annotated; the same secret inside a `noredact` fence is left untouched; a synthetic part containing a secret is untouched; verify all pass against the real secretlint linter (not just a stub).
-- [ ] 6.2 Verify the full test suite (`test/redact.test.js`, `test/index.test.js`, corpus/baseline tests) and project linter all pass with zero failures and zero suppressed diagnostics.
+- [x] 6.1 Add `test/index.test.js` coverage for the real end-to-end `chat.message` flow: a text part containing a real fixture secret outside a fence is redacted and annotated; the same secret inside a `noredact` fence is left untouched; a synthetic part containing a secret is untouched; verify all pass against the real secretlint linter (not just a stub).
+- [x] 6.2 Verify the full test suite (`test/redact.test.js`, `test/index.test.js`, corpus/baseline tests) and project linter all pass with zero failures and zero suppressed diagnostics.
 
 ## 7. Documentation
 
-- [ ] 7.1 Update README.md with the new `chat.message` hook's behavior, the non-synthetic-only scope, the exact ` ```noredact ` fence grammar and its segment-level semantics (including the longer-fence nesting-escape technique), and verify the new content reads consistently with the existing "Known limitations" section style.
-- [ ] 7.2 Add new README "Known limitations" entries: synthetic/attached content is not scanned; malformed/unterminated fences fail safe (still scanned); segment-splitting can suppress `detectExt`'s JSON-based GCP-key detection when a fence splits a JSON blob; a possible TUI optimistic-render gap analogous to the existing tool-output streaming-preview limitation (to be verified empirically, not asserted); verify each entry is present and worded consistently with existing entries.
+- [x] 7.1 Update README.md with the new `chat.message` hook's behavior, the non-synthetic-only scope, the exact ` ```noredact ` fence grammar and its segment-level semantics (including the longer-fence nesting-escape technique), and verify the new content reads consistently with the existing "Known limitations" section style.
+- [x] 7.2 Add new README "Known limitations" entries: synthetic/attached content is not scanned; malformed/unterminated fences fail safe (still scanned); segment-splitting can suppress `detectExt`'s JSON-based GCP-key detection when a fence splits a JSON blob; a possible TUI optimistic-render gap analogous to the existing tool-output streaming-preview limitation (to be verified empirically, not asserted); verify each entry is present and worded consistently with existing entries.
