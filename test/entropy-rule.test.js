@@ -14,9 +14,12 @@ import {
   isAllowlistedRun,
   findJwtSpans,
   findHighEntropyFindings,
+  findPasswordCandidateRuns,
+  hasLetterCaseMix,
+  hasLongClassRun,
   creator,
 } from "../src/entropy-rule.js";
-import { ENTROPY_FIXTURES } from "./entropy-fixtures.js";
+import { ENTROPY_FIXTURES, SHORT_PASSWORD_FIXTURES } from "./entropy-fixtures.js";
 
 const LOG2_36 = Math.log2(36); // 5.169925001442312
 const LOG2_26 = Math.log2(26); // 4.700439718141092
@@ -278,5 +281,190 @@ describe("entropy rule module (secretlint rule creator shape)", () => {
     expect(typeof reports[0].message.message).toBe("string");
     const [start, end] = reports[0].range;
     expect(content.slice(start, end)).toBe(fixture);
+  });
+});
+
+describe("findPasswordCandidateRuns", () => {
+  it("finds a single run spanning the whole input when it is all password-shaped charset", () => {
+    const text = "aB3!cD7#eF2$gH";
+    expect(findPasswordCandidateRuns(text)).toEqual([{ start: 0, end: text.length, text }]);
+  });
+
+  it("splits on characters outside the password-shaped charset (e.g. '/')", () => {
+    const text = "sha256-XY/aB1cD2eF3gH4iJ/ZW==";
+    const runs = findPasswordCandidateRuns(text);
+    expect(runs.map((r) => r.text)).toEqual(["sha256-XY", "aB1cD2eF3gH4iJ", "ZW"]);
+  });
+
+  it("is independent of the existing base64/hex tokenization pass", () => {
+    const text = "aB3!cD7#eF2$gH";
+    expect(findCandidateRuns(text).map((r) => r.text)).not.toEqual(findPasswordCandidateRuns(text).map((r) => r.text));
+  });
+});
+
+describe("hasLetterCaseMix", () => {
+  it("returns true when both a lowercase and an uppercase letter are present", () => {
+    expect(hasLetterCaseMix("aB1!cD2#eF3$gH4%iJ5^kL")).toBe(true);
+  });
+
+  it("returns false when only lowercase letters are present", () => {
+    expect(hasLetterCaseMix("a1!b2#c3$d4%e5^f")).toBe(false);
+  });
+
+  it("returns false when only uppercase letters are present", () => {
+    expect(hasLetterCaseMix("A1!B2#C3$D4%E5^F")).toBe(false);
+  });
+});
+
+describe("hasLongClassRun", () => {
+  it("returns false for a run with no 4+ same-class run (a genuine password shape)", () => {
+    expect(hasLongClassRun("aB1!cD2#eF3$gH4%iJ5^kL")).toBe(false);
+  });
+
+  it("returns true for a run containing a 4+ consecutive lowercase run", () => {
+    expect(hasLongClassRun("rightHandSymbols")).toBe(true);
+  });
+
+  it("returns true for a run containing a 4+ consecutive uppercase run", () => {
+    expect(hasLongClassRun("aBCDEfg1")).toBe(true);
+  });
+
+  it("returns true for a run containing a 4+ consecutive digit run", () => {
+    expect(hasLongClassRun("aB1234cD")).toBe(true);
+  });
+
+  it("returns true for a run containing a 4+ consecutive symbol run", () => {
+    expect(hasLongClassRun("aB!@#$cD")).toBe(true);
+  });
+});
+
+describe("findHighEntropyFindings — short password-shaped path", () => {
+  it("flags a password-shaped substring meeting every condition (14-character fixture at the floor)", () => {
+    const fixture = "aB3!cD7#eF2$gH";
+    expect(fixture).toHaveLength(14);
+    const findings = findHighEntropyFindings(fixture);
+    expect(findings).toEqual([{ start: 0, end: 14 }]);
+  });
+
+  it("flags a password-shaped substring meeting every condition (22-character fixture at the ceiling)", () => {
+    const fixture = "aB1!cD2#eF3$gH4%iJ5^kL";
+    expect(fixture).toHaveLength(22);
+    expect(findHighEntropyFindings(fixture)).toEqual([{ start: 0, end: 22 }]);
+  });
+
+  it("symbols are optional, not required", () => {
+    const fixture = "aB1mcD3NeF5mgH7NiJkL";
+    expect(fixture).toHaveLength(20);
+    expect(findHighEntropyFindings(fixture)).toEqual([{ start: 0, end: 20 }]);
+  });
+
+  it("does not flag a substring below the 14-character floor", () => {
+    const fixture = "aB3!cD7#eF2$g";
+    expect(fixture).toHaveLength(13);
+    expect(findHighEntropyFindings(fixture)).toEqual([]);
+  });
+
+  it("does not flag a substring at or below the entropy threshold (pins > not >=)", () => {
+    const fixture = "aBc3!DeF7#gH2$aB";
+    expect(fixture).toHaveLength(16);
+    expect(shannonEntropy(fixture)).toBeCloseTo(3.75, 9);
+    expect(findHighEntropyFindings(fixture)).toEqual([]);
+  });
+
+  it("does not flag a low-entropy repeated-pattern fixture even at floor-clearing length", () => {
+    const fixture = "Ab1!".repeat(4);
+    expect(fixture).toHaveLength(16);
+    expect(findHighEntropyFindings(fixture)).toEqual([]);
+  });
+
+  it("does not flag a substring missing a required letter case", () => {
+    const fixture = "a1!b2#c3$d4%e5^f";
+    expect(fixture).toHaveLength(16);
+    expect(shannonEntropy(fixture)).toBeCloseTo(4.0, 9);
+    expect(findHighEntropyFindings(fixture)).toEqual([]);
+  });
+
+  it("reports the case-mix twin of the above fixture (identical length and entropy; case mix is the only discriminator)", () => {
+    const fixture = "A1!b2#c3$d4%e5^f";
+    expect(fixture).toHaveLength(16);
+    expect(shannonEntropy(fixture)).toBeCloseTo(4.0, 9);
+    expect(findHighEntropyFindings(fixture)).toEqual([{ start: 0, end: 16 }]);
+  });
+
+  it("does not flag a substring with a same-class character run of four or more", () => {
+    const fixture = "acegikBDFHJL12345!#$%^";
+    expect(fixture).toHaveLength(22);
+    expect(shannonEntropy(fixture)).toBeCloseTo(4.4594316186, 9);
+    expect(hasLongClassRun(fixture)).toBe(true);
+    expect(findHighEntropyFindings(fixture)).toEqual([]);
+  });
+
+  it("does not report a real dependency-derived identifier rejected by the entropy threshold alone (regression guard)", () => {
+    const fixture = "getFileUrlFromFullPath";
+    expect(fixture).toHaveLength(22);
+    expect(hasLetterCaseMix(fixture)).toBe(true);
+    expect(hasLongClassRun(fixture)).toBe(false);
+    expect(shannonEntropy(fixture)).toBeLessThan(3.75);
+    expect(findHighEntropyFindings(fixture)).toEqual([]);
+  });
+
+  it("does not report a real dependency-derived identifier rejected by the class-run cap alone, despite clearing the entropy threshold (regression guard)", () => {
+    const fixture = "rightHandSymbols";
+    expect(fixture).toHaveLength(16);
+    expect(shannonEntropy(fixture)).toBeGreaterThan(3.75);
+    expect(hasLongClassRun(fixture)).toBe(true);
+    expect(findHighEntropyFindings(fixture)).toEqual([]);
+  });
+
+  it("does not independently report a real base64 fixture whose entropy is under threshold", () => {
+    const fixture = "aGVsbG8gd29ybGQ";
+    expect(fixture).toHaveLength(15);
+    expect(findHighEntropyFindings(fixture)).toEqual([]);
+  });
+
+  it("does not independently report a fragment of an allowlisted Subresource Integrity hash", () => {
+    const text = "sha256-XY/aB1cD2eF3gH4iJ/ZW==";
+    expect(findHighEntropyFindings(text)).toEqual([]);
+  });
+
+  it("does not independently report a fragment of a JWT header or payload segment", () => {
+    // header/payload segments are base64url and may satisfy the password
+    // path's charset/length/case-mix/run-cap conditions; the short path
+    // must still defer entirely to the JWT pre-pass.
+    const header = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
+    const payload = "eyJzdWIiOiIxMjM0NTY3ODkwIn0";
+    const signature = "aaaaaaaaaaaaaaaaaaaaaaaa";
+    const text = `${header}.${payload}.${signature}`;
+    const findings = findHighEntropyFindings(text);
+    // Exactly one finding: the JWT signature. No independent password-path
+    // finding inside the header or payload segments.
+    expect(findings).toHaveLength(1);
+    expect(text.slice(findings[0].start, findings[0].end)).toBe(signature);
+  });
+
+  it("does not double-report identical ranges when both the existing hex path and the short password path independently score the same run", () => {
+    // 16 distinct hex-alphabet characters (0-9a-fA-F), all-distinct so
+    // H = log2(16) = 4.0 -- clears the EXISTING hex path (threshold 3.0,
+    // min length 9) AND the new password path (threshold 3.75, length
+    // 14-22, case-mix, no long run) independently. The two tokenization
+    // passes are deliberately unaware of each other; this fixture proves
+    // findHighEntropyFindings itself de-duplicates the resulting identical
+    // range rather than relying on mergeIntervals downstream to absorb it.
+    const fixture = "0aA1bB2cC3dD4eE5";
+    expect(fixture).toHaveLength(16);
+    expect(shannonEntropy(fixture)).toBeCloseTo(4.0, 9);
+    const findings = findHighEntropyFindings(fixture);
+    expect(findings).toEqual([{ start: 0, end: 16 }]);
+  });
+});
+
+describe("SHORT_PASSWORD_FIXTURES (design.md verified fixtures)", () => {
+  it("matches expectFinding for every fixture via findHighEntropyFindings", () => {
+    for (const fixture of SHORT_PASSWORD_FIXTURES) {
+      const findings = findHighEntropyFindings(fixture.content);
+      expect(findings.length > 0, `fixture '${fixture.name}' expected finding=${fixture.expectFinding}`).toBe(
+        fixture.expectFinding,
+      );
+    }
   });
 });

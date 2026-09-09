@@ -80,3 +80,73 @@ export const ENTROPY_FIXTURES = [
     expectFinding: false,
   },
 ];
+
+// Verified fixtures for the short/password-shaped detection path (see the
+// add-short-password-secret-detection change's design.md). Each fixture's
+// exact Shannon entropy is documented and hand-verified; see that
+// design.md for the full derivation. Kept separate from ENTROPY_FIXTURES
+// (which covers only the pre-existing 23+/9+ character path) so each
+// fixture list documents exactly which detection path it exercises.
+export const SHORT_PASSWORD_FIXTURES = [
+  {
+    name: "P1: 14 chars at the floor, log2(14) ~= 3.8073549221",
+    content: "aB3!cD7#eF2$gH",
+    expectFinding: true,
+  },
+  {
+    name: "P2: 22 chars at the ceiling, log2(22) ~= 4.4594316186",
+    content: "aB1!cD2#eF3$gH4%iJ5^kL",
+    expectFinding: true,
+  },
+  {
+    name: "P3: 20 chars, no symbols (symbols are optional), r=2 repeats, H = log2(20) - 2*2/20 ~= 4.1219280949",
+    content: "aB1mcD3NeF5mgH7NiJkL",
+    expectFinding: true,
+  },
+  {
+    name: "N1: 13 chars, below the floor, log2(13) ~= 3.7004397181",
+    content: "aB3!cD7#eF2$g",
+    expectFinding: false,
+  },
+  {
+    name: "N2: 16 chars, entropy exactly 3.75 (pins > not >=)",
+    content: "aBc3!DeF7#gH2$aB",
+    expectFinding: false,
+  },
+  {
+    name: "N3: 16 chars, repeated 4-char pattern, log2(4) = 2.0 (proves it was scored, not length-skipped)",
+    content: "Ab1!".repeat(4),
+    expectFinding: false,
+  },
+  {
+    name: "N4a: 16 chars, all-lowercase-letters (no uppercase), log2(16) = 4.0 -- missing case mix",
+    content: "a1!b2#c3$d4%e5^f",
+    expectFinding: false,
+  },
+  {
+    name: "N4b: identical length/entropy to N4a, mixed case -- case mix is the only discriminator",
+    content: "A1!b2#c3$d4%e5^f",
+    expectFinding: true,
+  },
+  {
+    name: "N5: 22 chars, same multiset as P2 reordered into a 4+ same-class run -- run cap is the only discriminator",
+    content: "acegikBDFHJL12345!#$%^",
+    expectFinding: false,
+  },
+  {
+    name: "N6: real dependency-derived identifier, rejected by the entropy threshold alone (regression guard)",
+    content: "getFileUrlFromFullPath",
+    expectFinding: false,
+  },
+  {
+    name: "N7: real dependency-derived identifier, rejected by the class-run cap alone despite H=4.0 (regression guard)",
+    content: "rightHandSymbols",
+    expectFinding: false,
+  },
+  {
+    name: "N9: real base64 fixture under threshold",
+    content: "aGVsbG8gd29ybGQ",
+    expectFinding: false,
+  },
+];
+
