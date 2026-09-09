@@ -2,8 +2,6 @@
 // injected as a parameter, so this module is testable without invoking a real
 // scanner. See design.md D1.
 
-import { looksLikeSecret } from "./prescreen.js";
-
 const WHITESPACE_PATTERN = /\s/;
 
 /**
@@ -255,9 +253,18 @@ export function buildAnnotation(count, ruleIds) {
  * `redactUserMessage` (user messages, which additionally applies the
  * `noredact` fence exemption and aggregates across message parts). See
  * design.md D1.
+ *
+ * Deliberately does NOT apply the anchor-based prescreen itself (see
+ * design.md D2) — `lint` is expected to be a composed linter
+ * (`createCompositeLinter`, from src/secretlint.js) that gates its own
+ * anchored rule bundle behind the prescreen internally while always
+ * running the anchor-free high-entropy bundle. Applying the prescreen
+ * here, before ever calling `lint`, would prevent the entropy bundle from
+ * ever running on anchor-negative text — exactly the class of secret it
+ * exists to catch.
  */
 export async function scanAndRedact(text, { lint }) {
-  if (typeof text !== "string" || text.length === 0 || !looksLikeSecret(text)) {
+  if (typeof text !== "string" || text.length === 0) {
     return { text, redactionCount: 0, ruleIds: [] };
   }
 
@@ -301,13 +308,17 @@ export async function redactSecrets(text, { lint }) {
 
 /**
  * Orchestrates redaction for a single user-authored (non-synthetic) text
- * part: a whole-text `looksLikeSecret` fast path (sound because every
- * anchor is a substring/regex match, so no anchor in the whole text implies
- * none in any substring — design.md D5), then `splitNoRedactSegments` to
- * honor the `noredact` fence, then `scanAndRedact` on each non-exempt
- * segment. Exempt segments pass through byte-identical. Results are
- * concatenated in source order; `redactionCount` is summed and `ruleIds`
- * is the de-duplicated, sorted union across all scanned segments.
+ * part: `splitNoRedactSegments` honors the `noredact` fence, then
+ * `scanAndRedact` runs on each non-exempt segment. Exempt segments pass
+ * through byte-identical. Results are concatenated in source order;
+ * `redactionCount` is summed and `ruleIds` is the de-duplicated, sorted
+ * union across all scanned segments.
+ *
+ * Deliberately does NOT apply a whole-text anchor-based prescreen itself
+ * (design.md D2) — same reasoning as `scanAndRedact`: `lint` is expected
+ * to be a composed linter that always runs its anchor-free high-entropy
+ * bundle, and a prescreen here would suppress that on anchor-negative
+ * segments.
  *
  * Deliberately annotation-free (like `scanAndRedact`) — only the
  * `chat.message` hook, which sees every part of a message, can aggregate a
@@ -315,7 +326,7 @@ export async function redactSecrets(text, { lint }) {
  * design.md D1/D6.
  */
 export async function redactUserMessage(text, { lint }) {
-  if (typeof text !== "string" || text.length === 0 || !looksLikeSecret(text)) {
+  if (typeof text !== "string" || text.length === 0) {
     return { text, redactionCount: 0, ruleIds: [] };
   }
 
