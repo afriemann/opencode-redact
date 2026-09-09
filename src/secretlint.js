@@ -1,5 +1,7 @@
 import { loadPackagesFromConfigDescriptor } from "@secretlint/config-loader";
 import { lintSource } from "@secretlint/core";
+import { looksLikeSecret } from "./prescreen.js";
+import { creator as entropyRuleCreator } from "./entropy-rule.js";
 
 // Fixed configuration: the recommend preset with the filter-comments rule
 // disabled, so a `secretlint-disable` string embedded in untrusted scanned
@@ -86,5 +88,67 @@ export function createLinter(config, { timeoutMs = DEFAULT_TIMEOUT_MS, _lintSour
 
     const result = await Promise.race([lintPromise, timeoutPromise]);
     return result.messages;
+  };
+}
+
+/**
+ * Builds a one-rule secretlint config embedding the high-entropy rule
+ * creator directly — no npm package, no config-loader resolution, no
+ * `testReplaceDefinitions`. `SecretLintCoreConfig.rules` entries already
+ * carry the rule creator object directly (verified from
+ * `@secretlint/types`), so this is exactly the same shape
+ * `loadPackagesFromConfigDescriptor` would have produced, built by hand.
+ * Synchronous — there is nothing to load. See design.md D1.
+ */
+export function createEntropyConfig() {
+  return {
+    rules: [{ id: "high-entropy", rule: entropyRuleCreator }],
+  };
+}
+
+/**
+ * Composes the existing anchored preset bundle with the always-on
+ * high-entropy bundle behind a single `lint(text, opts?)` function, per
+ * design.md D1. The anchored bundle stays gated behind the anchor-based
+ * prescreen (`looksLikeSecret`) exactly as before; the high-entropy bundle
+ * is never gated by it, since a high-entropy secret has no literal anchor
+ * to prescreen for — it is included whenever `disableHighEntropy` is not
+ * `true`.
+ *
+ * `createSecretlintConfig`/`createLinter` are untouched by this function:
+ * setting `disableHighEntropy: true` reduces this composite to exactly
+ * today's single-bundle behavior.
+ *
+ * @param {object} presetConfig - the resolved config from `createSecretlintConfig()`.
+ * @param {{ disableHighEntropy?: boolean, timeoutMs?: number, _lintSourceOverride?: Function }} [options]
+ *   `disableHighEntropy` omits the entropy bundle entirely. `timeoutMs` and
+ *   `_lintSourceOverride` are forwarded to both underlying `createLinter`
+ *   calls. A second constructor argument is accepted (and ignored, if
+ *   absent) the same way `createLinter` is — existing test overrides that
+ *   only pass one argument keep working unchanged.
+ */
+export function createCompositeLinter(presetConfig, options = {}) {
+  const { disableHighEntropy = false, timeoutMs, _lintSourceOverride } = options;
+
+  const presetLint = createLinter(presetConfig, { timeoutMs, _lintSourceOverride });
+  const entropyLint = disableHighEntropy
+    ? null
+    : createLinter(createEntropyConfig(), { timeoutMs, _lintSourceOverride });
+
+  return async function lint(text, opts = {}) {
+    const messageLists = [];
+
+    if (looksLikeSecret(text)) {
+      messageLists.push(await presetLint(text, opts));
+    }
+
+    if (entropyLint) {
+      // Pinned ext: the rule ignores `ext` entirely, and pinning avoids
+      // detectExt's JSON.parse running a second time over the same input
+      // (see design.md D1).
+      messageLists.push(await entropyLint(text, { ext: ".txt" }));
+    }
+
+    return messageLists.flat();
   };
 }

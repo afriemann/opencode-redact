@@ -26,9 +26,9 @@
 
 ## 5. Composite linter (`src/secretlint.js`)
 
-- [ ] 5.1 Implement `createEntropyConfig()` building a one-rule secretlint config embedding the entropy rule creator directly (no npm package, no `testReplaceDefinitions`); verify a unit test confirms the resolved config's `rules` array contains exactly the entropy rule entry.
-- [ ] 5.2 Implement `createCompositeLinter(anchoredConfig, entropyConfig, options)` running the anchored bundle behind the existing `looksLikeSecret` prescreen (unchanged behavior) and the entropy bundle always, concatenating both bundles' messages into one array; pin `ext: ".txt"` for the entropy pass to avoid a redundant `JSON.parse`; verify `createSecretlintConfig`/`createLinter` remain byte-identical (no edits) and a unit test proves a text containing both an anchored-rule fixture and a high-entropy-only substring reports both findings.
-- [ ] 5.3 Verify `disableHighEntropy: true` reduces the composite linter's behavior to exactly today's single-bundle behavior (a test asserts no entropy-only finding is ever reported, while anchored-rule fixtures still report normally).
+- [x] 5.1 Implement `createEntropyConfig()` building a one-rule secretlint config embedding the entropy rule creator directly (no npm package, no `testReplaceDefinitions`); verify a unit test confirms the resolved config's `rules` array contains exactly the entropy rule entry.
+- [x] 5.2 Implement `createCompositeLinter(anchoredConfig, entropyConfig, options)` running the anchored bundle behind the existing `looksLikeSecret` prescreen (unchanged behavior) and the entropy bundle always, concatenating both bundles' messages into one array; pin `ext: ".txt"` for the entropy pass to avoid a redundant `JSON.parse`; verify `createSecretlintConfig`/`createLinter` remain byte-identical (no edits) and a unit test proves a text containing both an anchored-rule fixture and a high-entropy-only substring reports both findings.
+- [x] 5.3 Verify `disableHighEntropy: true` reduces the composite linter's behavior to exactly today's single-bundle behavior (a test asserts no entropy-only finding is ever reported, while anchored-rule fixtures still report normally).
 
 ## 6. Plugin startup wiring (`src/index.js`)
 
