@@ -32,8 +32,8 @@
 
 ## 6. Plugin startup wiring (`src/index.js`)
 
-- [ ] 6.1 Load `redact.jsonc` via `loadPluginConfig()` in its own `try` block, separate from the existing fail-loud `createSecretlintConfig()` try block, per design.md D8 — a config-load problem must never be conflated with or escalate to the existing fail-loud secretlint-rule-config-failure behavior; verify a unit test confirms a malformed `redact.jsonc` does not prevent plugin startup, while a failed secretlint preset load still throws exactly as before.
-- [ ] 6.2 Wire `createCompositeLinter` into the plugin factory, gated by the loaded `disableHighEntropy` setting, preserving the existing `_createLinterOverride`/`_createSecretlintConfigOverride` test seams unchanged; verify existing `test/index.test.js` hook tests all still pass unmodified.
+- [x] 6.1 Load `redact.jsonc` via `loadPluginConfig()` in its own `try` block, separate from the existing fail-loud `createSecretlintConfig()` try block, per design.md D8 — a config-load problem must never be conflated with or escalate to the existing fail-loud secretlint-rule-config-failure behavior; verify a unit test confirms a malformed `redact.jsonc` does not prevent plugin startup, while a failed secretlint preset load still throws exactly as before.
+- [x] 6.2 Wire `createCompositeLinter` into the plugin factory, gated by the loaded `disableHighEntropy` setting, preserving the existing `_createLinterOverride`/`_createSecretlintConfigOverride` test seams unchanged; verify existing `test/index.test.js` hook tests all still pass unmodified.
 
 ## 7. Integration tests
 

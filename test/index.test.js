@@ -53,6 +53,53 @@ describe("plugin factory", () => {
     const [[call]] = client.app.log.mock.calls;
     expect(call.body.level).toBe("error");
   });
+
+  it("passes the loaded disableHighEntropy setting through to the linter constructor", async () => {
+    const client = fakeClient();
+    const capturedOptions = [];
+    const linterOverride = (config, options) => {
+      capturedOptions.push(options);
+      return async () => [];
+    };
+    const configOverride = async () => ({ disableHighEntropy: true });
+    await OpencodeRedact(
+      { client },
+      { _loadPluginConfigOverride: configOverride, _createLinterOverride: linterOverride },
+    );
+    expect(capturedOptions[0]).toMatchObject({ disableHighEntropy: true });
+  });
+
+  it("keeps plugin-config loading and secretlint-config loading in separate failure contracts: a broken secretlint config still throws even though plugin config resolved fine", async () => {
+    const client = fakeClient();
+    const configOverride = vi.fn().mockResolvedValue({ disableHighEntropy: false });
+    const brokenSecretlintFactory = async () => {
+      throw new Error("secretlint preset failed to resolve");
+    };
+    await expect(
+      OpencodeRedact(
+        { client },
+        { _loadPluginConfigOverride: configOverride, _createSecretlintConfigOverride: brokenSecretlintFactory },
+      ),
+    ).rejects.toThrow("secretlint preset failed to resolve");
+    expect(configOverride).toHaveBeenCalled();
+  });
+
+  it("does not conflate the two failure contracts in logging: a secretlint-config failure logs about secretlint, never about plugin configuration", async () => {
+    const client = fakeClient();
+    const configOverride = vi.fn().mockResolvedValue({ disableHighEntropy: false });
+    const brokenSecretlintFactory = async () => {
+      throw new Error("secretlint preset failed to resolve");
+    };
+    await expect(
+      OpencodeRedact(
+        { client },
+        { _loadPluginConfigOverride: configOverride, _createSecretlintConfigOverride: brokenSecretlintFactory },
+      ),
+    ).rejects.toThrow();
+    const messages = client.app.log.mock.calls.map((call) => call[0].body.message);
+    expect(messages.some((m) => m.includes("secretlint"))).toBe(true);
+    expect(messages.some((m) => m.toLowerCase().includes("plugin configuration"))).toBe(false);
+  });
 });
 
 describe("tool.execute.after handler", () => {
