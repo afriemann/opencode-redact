@@ -44,6 +44,6 @@
 
 ## 8. Documentation
 
-- [ ] 8.1 Update README.md: new "Configuration" section documenting the `redact.jsonc` path, schema, default, and fail-open-on-malformed-file behavior; document the new high-entropy rule and its full allowlist.
-- [ ] 8.2 Replace the "No config surface of any kind" Known-limitations entry; add new entries for the accepted blind spots (allowlisted shapes are never flagged even if reused as a real secret; JWT claims are not preserved in v1 despite signature-only targeting, due to existing token-boundary expansion; an unsigned JWT's claims pass through completely unprotected).
-- [ ] 8.3 Refresh `.secrets.baseline` (the pre-commit `detect-secrets` hook) if it flags the new high-entropy test fixtures — expected, since they are deliberately high-entropy.
+- [x] 8.1 Update README.md: new "Configuration" section documenting the `redact.jsonc` path, schema, default, and fail-open-on-malformed-file behavior; document the new high-entropy rule and its full allowlist.
+- [x] 8.2 Replace the "No config surface of any kind" Known-limitations entry; add new entries for the accepted blind spots (allowlisted shapes are never flagged even if reused as a real secret; JWT claims are not preserved in v1 despite signature-only targeting, due to existing token-boundary expansion; an unsigned JWT's claims pass through completely unprotected).
+- [x] 8.3 Refresh `.secrets.baseline` (the pre-commit `detect-secrets` hook) if it flags the new high-entropy test fixtures — expected, since they are deliberately high-entropy.
