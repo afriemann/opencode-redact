@@ -134,6 +134,77 @@ function isWithinAnySpan(run, spans) {
   return spans.some((span) => run.start >= span.start && run.end <= span.end);
 }
 
+// --- Short password-shaped detection path (independent of the base64/hex
+// path above) --- see the add-short-password-secret-detection change's
+// design.md for the full derivation of every constant below.
+//
+// A second, independent tokenization pass over an expanded charset: the
+// base64/hex path above never even sees these characters, so a typed
+// password containing punctuation (`Tr0ub4dor!23`) would otherwise split
+// into unrecognizable fragments. Deliberately NOT merged into
+// CANDIDATE_RUN_PATTERN above — widening that pattern would shift the
+// existing path's own run boundaries and invalidate its calibration.
+const PASSWORD_CANDIDATE_PATTERN = /[A-Za-z0-9!#$%^+~@_-]+/g;
+
+// Calibrated threshold: the highest entropy an all-distinct-character
+// ordinary identifier can reach at length 13 is log2(13) ≈ 3.7004, and the
+// lowest an all-distinct-character string at length 14 can reach is
+// log2(14) ≈ 3.8074 — the midpoint of that admissible interval is chosen
+// so the floor and the threshold cannot be tuned independently. This
+// threshold, on its own, does NOT separate a random password from an
+// ordinary camelCase/PascalCase identifier of the same length (both hit
+// the same log2(length) entropy ceiling) — see the mandatory
+// character-class-run cap below, which is equally load-bearing.
+const SHORT_THRESHOLD = 3.75;
+const SHORT_MIN_LENGTH = Math.floor(2 ** SHORT_THRESHOLD) + 1; // 14
+const SHORT_MAX_LENGTH = BASE64_MIN_LENGTH - 1; // 22 — the existing base64 path takes over at 23+
+
+const LOWERCASE_PATTERN = /[a-z]/;
+const UPPERCASE_PATTERN = /[A-Z]/;
+// Rejects any run of 4+ consecutive characters from the same character
+// class (lowercase / uppercase / digit / symbol). This is what actually
+// separates a random password from an ordinary identifier: a real
+// dependency identifier like `rightHandSymbols` clears the entropy
+// threshold above but contains a 5-character all-lowercase run (`right`)
+// and is correctly rejected here; a genuine password with the same
+// entropy but no such run survives.
+const LONG_CLASS_RUN_PATTERN = /[a-z]{4}|[A-Z]{4}|[0-9]{4}|[!#$%^+~@_-]{4}/;
+
+/**
+ * Returns every maximal run of the password-shaped charset in `text`, in
+ * source order, as `{ start, end, text }`. Independent of
+ * `findCandidateRuns` — does not affect, and is not affected by, the
+ * base64/hex tokenization pass.
+ */
+export function findPasswordCandidateRuns(text) {
+  const runs = [];
+  for (const match of text.matchAll(PASSWORD_CANDIDATE_PATTERN)) {
+    runs.push({ start: match.index, end: match.index + match[0].length, text: match[0] });
+  }
+  return runs;
+}
+
+/**
+ * Returns true when `run` contains at least one lowercase letter AND at
+ * least one uppercase letter. Mandatory precondition for the short
+ * password path — on its own, not sufficient (see `hasLongClassRun` and
+ * the entropy threshold).
+ */
+export function hasLetterCaseMix(run) {
+  return LOWERCASE_PATTERN.test(run) && UPPERCASE_PATTERN.test(run);
+}
+
+/**
+ * Returns true when `run` contains a run of 4 or more consecutive
+ * characters from the same character class (lowercase, uppercase, digit,
+ * or the password-punctuation symbols). A `true` result means the
+ * candidate must be REJECTED — see design.md for why this is required
+ * alongside, not instead of, the entropy threshold.
+ */
+export function hasLongClassRun(run) {
+  return LONG_CLASS_RUN_PATTERN.test(run);
+}
+
 /**
  * Orchestrates the full per-message detection pass: the JWT pre-pass
  * (reporting only non-empty signature segments, unconditionally), then
@@ -152,11 +223,15 @@ export function findHighEntropyFindings(text) {
     }
   }
 
-  for (const run of findCandidateRuns(text)) {
+  const existingRuns = findCandidateRuns(text);
+  const allowlistedSpans = [];
+
+  for (const run of existingRuns) {
     if (isWithinAnySpan(run, jwtSpans)) {
       continue;
     }
     if (isAllowlistedRun(run.text)) {
+      allowlistedSpans.push(run);
       continue;
     }
     const classification = classifyRun(run.text);
@@ -164,6 +239,31 @@ export function findHighEntropyFindings(text) {
       continue;
     }
     if (shannonEntropy(run.text) > classification.threshold) {
+      findings.push({ start: run.start, end: run.end });
+    }
+  }
+
+  // Short password-shaped path: independent tokenization, but excludes any
+  // candidate already governed by the JWT pre-pass or the existing path's
+  // allowlist (e.g. a Subresource Integrity hash's digest fragment), so it
+  // cannot reintroduce a false positive an existing exemption already
+  // rules out, nor double-report a JWT's header/payload.
+  const exemptSpans = [...jwtSpans, ...allowlistedSpans];
+
+  for (const run of findPasswordCandidateRuns(text)) {
+    if (run.text.length < SHORT_MIN_LENGTH || run.text.length > SHORT_MAX_LENGTH) {
+      continue;
+    }
+    if (isWithinAnySpan(run, exemptSpans)) {
+      continue;
+    }
+    if (!hasLetterCaseMix(run.text)) {
+      continue;
+    }
+    if (hasLongClassRun(run.text)) {
+      continue;
+    }
+    if (shannonEntropy(run.text) > SHORT_THRESHOLD) {
       findings.push({ start: run.start, end: run.end });
     }
   }
