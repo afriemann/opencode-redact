@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { describe, it, expect, vi } from "vitest";
 import OpencodeRedact from "../src/index.js";
 import { RULE_FIXTURES } from "./fixtures.js";
+import { ENTROPY_FIXTURES } from "./entropy-fixtures.js";
 
 const SRC_DIR = fileURLToPath(new URL("../src/", import.meta.url));
 
@@ -349,5 +350,91 @@ describe("chat.message handler", () => {
     expect(writes).toBe(2);
     const errorLogCall = client.app.log.mock.calls.find(([call]) => call.body.level === "error");
     expect(errorLogCall[0].body.message).toContain("failed to append user-message redaction annotation");
+  });
+});
+
+describe("high-entropy secret detection (end-to-end, both hooks, real composite linter)", () => {
+  const entropyFixture = ENTROPY_FIXTURES.find((f) => f.expectFinding && f.name.startsWith("base64 positive"));
+
+  function textPart(text, overrides = {}) {
+    return { type: "text", text, ...overrides };
+  }
+
+  it("redacts a bespoke high-entropy secret with no vendor anchor in tool output", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    const output = { output: entropyFixture.content, metadata: {} };
+    await hooks["tool.execute.after"]({ tool: "bash", sessionID: "s1", callID: "c1" }, output);
+    expect(output.output).toContain("***REDACTED:high-entropy***");
+    expect(output.output).not.toContain(entropyFixture.content);
+  });
+
+  it("redacts a bespoke high-entropy secret with no vendor anchor in a user message", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    const part = textPart(entropyFixture.content);
+    const output = { message: {}, parts: [part] };
+    await hooks["chat.message"]({ sessionID: "s1" }, output);
+    expect(part.text).toContain("***REDACTED:high-entropy***");
+    expect(part.text).not.toContain(entropyFixture.content);
+  });
+
+  it("leaves every allowlisted fixture (git SHA, UUID, hash digest, SRI hash) unredacted in tool output", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    for (const fixture of ENTROPY_FIXTURES.filter((f) => !f.expectFinding && !f.name.startsWith("unsigned JWT"))) {
+      const output = { output: fixture.content, metadata: {} };
+      await hooks["tool.execute.after"]({ tool: "bash", sessionID: "s1", callID: "c1" }, output);
+      expect(output.output, `fixture '${fixture.name}' should not have been redacted`).toBe(fixture.content);
+    }
+  });
+
+  it("redacts a signed JWT as a single placeholder covering the whole token", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    const jwtFixture = ENTROPY_FIXTURES.find((f) => f.name.startsWith("signed JWT"));
+    const output = { output: jwtFixture.content, metadata: {} };
+    await hooks["tool.execute.after"]({ tool: "bash", sessionID: "s1", callID: "c1" }, output);
+    expect(output.output).toContain("***REDACTED:high-entropy***");
+    expect(output.output).not.toContain(jwtFixture.content);
+    // Exactly one placeholder for the whole token, not three (one per segment).
+    const placeholderMatches = output.output.match(/\*\*\*REDACTED:high-entropy\*\*\*/g) ?? [];
+    expect(placeholderMatches).toHaveLength(1);
+  });
+
+  it("leaves an unsigned (alg: none) JWT completely unredacted", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    const unsignedJwtFixture = ENTROPY_FIXTURES.find((f) => f.name.startsWith("unsigned JWT"));
+    const output = { output: unsignedJwtFixture.content, metadata: {} };
+    await hooks["tool.execute.after"]({ tool: "bash", sessionID: "s1", callID: "c1" }, output);
+    expect(output.output).toBe(unsignedJwtFixture.content);
+  });
+
+  it("still detects every anchored RULE_FIXTURES entry unchanged, alongside the new entropy rule", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    for (const fixture of RULE_FIXTURES) {
+      const output = { output: fixture.content, metadata: {} };
+      await hooks["tool.execute.after"]({ tool: "bash", sessionID: "s1", callID: "c1" }, output);
+      expect(output.output, `fixture '${fixture.rule}' should have been redacted`).toContain("***REDACTED:");
+    }
+  });
+
+  it("omits high-entropy detection entirely when disableHighEntropy is configured, while anchored rules still fire", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact(
+      { client },
+      { _loadPluginConfigOverride: async () => ({ disableHighEntropy: true }) },
+    );
+
+    const entropyOutput = { output: entropyFixture.content, metadata: {} };
+    await hooks["tool.execute.after"]({ tool: "bash", sessionID: "s1", callID: "c1" }, entropyOutput);
+    expect(entropyOutput.output).toBe(entropyFixture.content);
+
+    const awsFixture = RULE_FIXTURES.find((f) => f.rule === "aws");
+    const awsOutput = { output: awsFixture.content, metadata: {} };
+    await hooks["tool.execute.after"]({ tool: "bash", sessionID: "s1", callID: "c1" }, awsOutput);
+    expect(awsOutput.output).toContain("***REDACTED:");
   });
 });

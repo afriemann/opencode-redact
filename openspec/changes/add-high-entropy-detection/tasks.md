@@ -37,10 +37,10 @@
 
 ## 7. Integration tests
 
-- [ ] 7.1 Add an end-to-end test (through the real composite linter, both hooks) proving a bespoke, non-vendor-pattern high-entropy token is redacted as `***REDACTED:high-entropy***` in both tool output and a user message.
-- [ ] 7.2 Add an end-to-end test proving a git commit SHA, a UUID, a common-length hash digest, and an SRI hash all pass through unredacted via the real composite linter.
-- [ ] 7.3 Add an end-to-end test proving a signed JWT is redacted as a single placeholder and an unsigned JWT passes through unredacted, via the real composite linter.
-- [ ] 7.4 Verify the full test suite (all unit, baseline, and integration tests) passes with zero failures and zero suppressed diagnostics.
+- [x] 7.1 Add an end-to-end test (through the real composite linter, both hooks) proving a bespoke, non-vendor-pattern high-entropy token is redacted as `***REDACTED:high-entropy***` in both tool output and a user message.
+- [x] 7.2 Add an end-to-end test proving a git commit SHA, a UUID, a common-length hash digest, and an SRI hash all pass through unredacted via the real composite linter.
+- [x] 7.3 Add an end-to-end test proving a signed JWT is redacted as a single placeholder and an unsigned JWT passes through unredacted, via the real composite linter.
+- [x] 7.4 Verify the full test suite (all unit, baseline, and integration tests) passes with zero failures and zero suppressed diagnostics.
 
 ## 8. Documentation
 
