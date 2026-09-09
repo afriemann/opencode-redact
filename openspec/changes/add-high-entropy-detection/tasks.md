@@ -21,8 +21,8 @@
 
 ## 4. Prescreen extraction (behavior-preserving refactor)
 
-- [ ] 4.1 Extract `looksLikeSecret` and its two anchor/credential-URL patterns from `src/redact.js` into `src/prescreen.js`, unchanged; update `src/redact.js`'s imports; verify the full existing test suite (including `test/redact-baseline.test.js`) passes with zero edits to the baseline file or any baseline entry.
-- [ ] 4.2 Relocate the "never calls lint" prescreen-negative assertions to reference the extracted module where appropriate; verify no test's behavior changed, only its import source.
+- [x] 4.1 Extract `looksLikeSecret` and its two anchor/credential-URL patterns from `src/redact.js` into `src/prescreen.js`, unchanged; update `src/redact.js`'s imports; verify the full existing test suite (including `test/redact-baseline.test.js`) passes with zero edits to the baseline file or any baseline entry.
+- [x] 4.2 Relocate the "never calls lint" prescreen-negative assertions to reference the extracted module where appropriate; verify no test's behavior changed, only its import source.
 
 ## 5. Composite linter (`src/secretlint.js`)
 

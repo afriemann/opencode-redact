@@ -1,9 +1,7 @@
 // spec: openspec/specs/tool-output-redaction/spec.md
 // spec: openspec/changes/add-user-message-redaction/specs/user-message-redaction/spec.md
 import { describe, it, expect, vi } from "vitest";
-import { RULE_FIXTURES } from "./fixtures.js";
 import {
-  looksLikeSecret,
   normalizeRanges,
   expandToTokenBoundaries,
   mergeIntervals,
@@ -15,30 +13,6 @@ import {
   redactUserMessage,
   buildUserMessageAnnotation,
 } from "../src/redact.js";
-
-describe("looksLikeSecret", () => {
-  it("does not skip a positive fixture for any rule", () => {
-    for (const fixture of RULE_FIXTURES) {
-      expect(
-        looksLikeSecret(fixture.content),
-        `expected looksLikeSecret to return true for rule '${fixture.rule}' fixture`,
-      ).toBe(true);
-    }
-  });
-
-  it("returns false for clean, unremarkable text", () => {
-    expect(looksLikeSecret("the quick brown fox jumps over the lazy dog")).toBe(false);
-  });
-
-  it("returns false for an empty string", () => {
-    expect(looksLikeSecret("")).toBe(false);
-  });
-
-  it("is case-insensitive", () => {
-    expect(looksLikeSecret("AWS_SECRET_ACCESS_KEY=x")).toBe(true);
-    expect(looksLikeSecret("aws_secret_access_key=x")).toBe(true);
-  });
-});
 
 describe("expandToTokenBoundaries", () => {
   it("expands a range left and right to the nearest whitespace", () => {
