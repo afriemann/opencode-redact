@@ -1,3 +1,5 @@
+// spec: openspec/specs/tool-output-redaction/spec.md
+// spec: openspec/changes/add-user-message-redaction/specs/user-message-redaction/spec.md
 import { describe, it, expect, vi } from "vitest";
 import { RULE_FIXTURES } from "./fixtures.js";
 import {
@@ -8,7 +10,10 @@ import {
   spliceRedactions,
   shortRuleId,
   buildAnnotation,
+  scanAndRedact,
   redactSecrets,
+  redactUserMessage,
+  buildUserMessageAnnotation,
 } from "../src/redact.js";
 
 describe("looksLikeSecret", () => {
@@ -171,7 +176,55 @@ describe("buildAnnotation", () => {
   });
 });
 
+describe("scanAndRedact", () => {
+  it("returns the input unchanged and never calls lint for an empty string", async () => {
+    const lint = vi.fn();
+    const result = await scanAndRedact("", { lint });
+    expect(result).toEqual({ text: "", redactionCount: 0, ruleIds: [] });
+    expect(lint).not.toHaveBeenCalled();
+  });
+
+  it("returns the input unchanged and never calls lint for a non-string value", async () => {
+    const lint = vi.fn();
+    const result = await scanAndRedact(undefined, { lint });
+    expect(result).toEqual({ text: undefined, redactionCount: 0, ruleIds: [] });
+    expect(lint).not.toHaveBeenCalled();
+  });
+
+  it("returns the redacted text with NO annotation appended when a finding is redacted", async () => {
+    const text = "token: AAAAAAAAAAAAAAAAAAAA secret_value";
+    const start = text.indexOf("AAAAAAAAAAAAAAAAAAAA");
+    const end = start + "AAAAAAAAAAAAAAAAAAAA".length;
+    const lint = vi.fn().mockResolvedValue([{ ruleId: "@secretlint/secretlint-rule-example", range: [start, end] }]);
+    const result = await scanAndRedact(text, { lint });
+    expect(result.text).toContain("***REDACTED:example***");
+    expect(result.text).not.toContain("[opencode-redact]");
+    expect(result.redactionCount).toBe(1);
+    expect(result.ruleIds).toEqual(["example"]);
+  });
+
+  it("returns the original text unchanged when lint throws (fail open)", async () => {
+    const lint = vi.fn().mockRejectedValue(new Error("scanner exploded"));
+    const text = "aws_secret_access_key=AAAAAAAAAAAAAAAAAAAA";
+    const result = await scanAndRedact(text, { lint });
+    expect(result).toEqual({ text, redactionCount: 0, ruleIds: [] });
+  });
+});
+
 describe("redactSecrets", () => {
+  it("is scanAndRedact plus the tool-output annotation appended after a redaction", async () => {
+    const text = "token: AAAAAAAAAAAAAAAAAAAA secret_value";
+    const start = text.indexOf("AAAAAAAAAAAAAAAAAAAA");
+    const end = start + "AAAAAAAAAAAAAAAAAAAA".length;
+    const lint = vi.fn().mockResolvedValue([{ ruleId: "@secretlint/secretlint-rule-example", range: [start, end] }]);
+    const scanned = await scanAndRedact(text, { lint });
+    const redacted = await redactSecrets(text, { lint });
+    expect(redacted.text).toBe(`${scanned.text}\n\n${buildAnnotation(scanned.redactionCount, scanned.ruleIds)}`);
+    expect(redacted.redactionCount).toBe(scanned.redactionCount);
+    expect(redacted.ruleIds).toEqual(scanned.ruleIds);
+  });
+
+
   it("returns the input unchanged and never calls lint for an empty string", async () => {
     const lint = vi.fn();
     const result = await redactSecrets("", { lint });
@@ -273,5 +326,135 @@ describe("redactSecrets", () => {
     const lint = vi.fn().mockResolvedValue([]);
     const result = await redactSecrets(text, { lint });
     expect(result).toEqual({ text, redactionCount: 0, ruleIds: [] });
+  });
+});
+
+describe("redactUserMessage", () => {
+  it("returns the input unchanged and never calls lint for an empty string", async () => {
+    const lint = vi.fn();
+    const result = await redactUserMessage("", { lint });
+    expect(result).toEqual({ text: "", redactionCount: 0, ruleIds: [] });
+    expect(lint).not.toHaveBeenCalled();
+  });
+
+  it("returns the input unchanged and never calls lint for a non-string value", async () => {
+    const lint = vi.fn();
+    const result = await redactUserMessage(undefined, { lint });
+    expect(result).toEqual({ text: undefined, redactionCount: 0, ruleIds: [] });
+    expect(lint).not.toHaveBeenCalled();
+  });
+
+  it("returns the input unchanged and never calls lint for clean text (whole-part prescreen fast path)", async () => {
+    const lint = vi.fn();
+    const text = "the quick brown fox jumps over the lazy dog";
+    const result = await redactUserMessage(text, { lint });
+    expect(result).toEqual({ text, redactionCount: 0, ruleIds: [] });
+    expect(lint).not.toHaveBeenCalled();
+  });
+
+  it("redacts a secret found outside any fence, appending no annotation itself", async () => {
+    const text = "token: AAAAAAAAAAAAAAAAAAAA secret_value";
+    const start = text.indexOf("AAAAAAAAAAAAAAAAAAAA");
+    const end = start + "AAAAAAAAAAAAAAAAAAAA".length;
+    const lint = vi.fn().mockResolvedValue([{ ruleId: "@secretlint/secretlint-rule-example", range: [start, end] }]);
+    const result = await redactUserMessage(text, { lint });
+    expect(result.text).toContain("***REDACTED:example***");
+    expect(result.text).not.toContain("[opencode-redact]");
+    expect(result.redactionCount).toBe(1);
+    expect(result.ruleIds).toEqual(["example"]);
+  });
+
+  it("leaves a noredact-fenced secret completely untouched, proving the exemption works (checksum example)", async () => {
+    // A checksum that would otherwise trip a rule's anchor if scanned; wrapping it
+    // in a noredact fence must leave it byte-identical, and the scanner must never
+    // even be invoked for that segment.
+    const checksum = "aws_secret_access_key=AAAAAAAAAAAAAAAAAAAA";
+    const text = `Here is a checksum:\n\`\`\`noredact\n${checksum}\n\`\`\`\nthanks!`;
+    const lint = vi.fn().mockResolvedValue([]);
+    const result = await redactUserMessage(text, { lint });
+    expect(result.text).toBe(text);
+    expect(result.text).toContain(checksum);
+    expect(result.redactionCount).toBe(0);
+    expect(result.ruleIds).toEqual([]);
+    // The fenced segment's own content contains the "secret" anchor, so if the
+    // fence were not honored, lint would have been called for it. The other
+    // (non-fenced) text contains no anchor, so lint is never invoked at all.
+    expect(lint).not.toHaveBeenCalled();
+  });
+
+  it("redacts a secret outside the fence while leaving the fenced segment untouched, in the same message", async () => {
+    const secretText = "aws_secret_access_key=AAAAAAAAAAAAAAAAAAAA";
+    const fencedChecksum = "sha256:deadbeefsecretchecksum";
+    const text = `${secretText}\n\`\`\`noredact\n${fencedChecksum}\n\`\`\`\n`;
+    const start = text.indexOf("AAAAAAAAAAAAAAAAAAAA");
+    const end = start + "AAAAAAAAAAAAAAAAAAAA".length;
+    const lint = vi.fn().mockImplementation(async (segmentText) => {
+      if (segmentText.includes(fencedChecksum)) {
+        throw new Error("lint must never be called on an exempt segment");
+      }
+      return [{ ruleId: "@secretlint/secretlint-rule-aws", range: [start, end] }];
+    });
+    const result = await redactUserMessage(text, { lint });
+    expect(result.text).toContain("***REDACTED:aws***");
+    expect(result.text).toContain(fencedChecksum);
+    expect(result.redactionCount).toBe(1);
+    expect(result.ruleIds).toEqual(["aws"]);
+  });
+
+  it("sums redactionCount and unions+sorts ruleIds across multiple non-exempt segments", async () => {
+    const text = "secret_one=AAAAAAAAAA\n```noredact\nsecret_untouched=BBBBBBBBBB\n```\nsecret_two=CCCCCCCCCC";
+    const lint = vi.fn().mockImplementation(async (segmentText) => {
+      const messages = [];
+      if (segmentText.includes("AAAAAAAAAA")) {
+        messages.push({
+          ruleId: "@secretlint/secretlint-rule-two",
+          range: [segmentText.indexOf("AAAAAAAAAA"), segmentText.indexOf("AAAAAAAAAA") + 10],
+        });
+      }
+      if (segmentText.includes("CCCCCCCCCC")) {
+        messages.push({
+          ruleId: "@secretlint/secretlint-rule-one",
+          range: [segmentText.indexOf("CCCCCCCCCC"), segmentText.indexOf("CCCCCCCCCC") + 10],
+        });
+      }
+      return messages;
+    });
+    const result = await redactUserMessage(text, { lint });
+    expect(result.redactionCount).toBe(2);
+    expect(result.ruleIds).toEqual(["one", "two"]);
+    expect(result.text).toContain("BBBBBBBBBB"); // exempt segment untouched
+  });
+
+  it("returns the original text unchanged when lint throws for a non-exempt segment (fail open)", async () => {
+    const text = "aws_secret_access_key=AAAAAAAAAAAAAAAAAAAA";
+    const lint = vi.fn().mockRejectedValue(new Error("scanner exploded"));
+    const result = await redactUserMessage(text, { lint });
+    expect(result).toEqual({ text, redactionCount: 0, ruleIds: [] });
+  });
+});
+
+describe("buildUserMessageAnnotation", () => {
+  it("mentions the redaction count and deduplicated, sorted rule labels", () => {
+    const annotation = buildUserMessageAnnotation(2, ["aws", "privatekey", "aws"]);
+    expect(annotation).toContain("2");
+    expect(annotation).toContain("aws+privatekey");
+  });
+
+  it("instructs never to write a placeholder back to a file or message, and not to reconstruct the value", () => {
+    const annotation = buildUserMessageAnnotation(1, ["aws"]);
+    expect(annotation.toLowerCase()).toContain("never");
+    expect(annotation.toLowerCase()).toContain("reconstruct");
+    expect(annotation).toContain("***REDACTED:");
+  });
+
+  it("makes no mention of the noredact fence or any exemption mechanism", () => {
+    const annotation = buildUserMessageAnnotation(1, ["aws"]);
+    expect(annotation.toLowerCase()).not.toContain("noredact");
+    expect(annotation.toLowerCase()).not.toContain("fence");
+  });
+
+  it("differs from the tool-output annotation (does not tell the model to ask the user for the value)", () => {
+    const annotation = buildUserMessageAnnotation(1, ["aws"]);
+    expect(annotation.toLowerCase()).not.toContain("ask the user");
   });
 });

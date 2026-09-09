@@ -221,6 +221,114 @@ export function spliceRedactions(text, mergedIntervals) {
   return parts.join("");
 }
 
+// Opening fence line: 0-3 leading spaces, a run of 3+ backticks, then an
+// info string that (after trimming spaces/tabs) is checked to be exactly
+// "noredact" — see the token check below. See design.md D4.
+const OPEN_FENCE_LINE_PATTERN = /^[ ]{0,3}(`{3,})[ \t]*([^\s]*)[ \t]*$/;
+
+/**
+ * Returns the opening fence's backtick-run length when `lineContent`
+ * (a single line, terminator already stripped) is a valid noredact opening
+ * fence line, or `null` otherwise. The info-string token is required to be
+ * exactly "noredact", ASCII case-insensitive — matched with an explicit
+ * `[A-Za-z]` check (not a Unicode-aware `toLowerCase`) so a homoglyph or
+ * case-folding trick cannot open a fence (design.md D4 row 5).
+ */
+function matchOpenFence(lineContent) {
+  const match = OPEN_FENCE_LINE_PATTERN.exec(lineContent);
+  if (!match) {
+    return null;
+  }
+  const [, backticks, token] = match;
+  if (!/^[A-Za-z]+$/.test(token) || token.toLowerCase() !== "noredact") {
+    return null;
+  }
+  return backticks.length;
+}
+
+/**
+ * Returns true when `lineContent` is a valid closing fence line for an
+ * opening run of exactly `fenceLength` backticks. The closer's backtick run
+ * must match the opener's length EXACTLY (not CommonMark's "closer >=
+ * opener") — see design.md D4 row 1.
+ */
+function matchCloseFence(lineContent, fenceLength) {
+  const pattern = new RegExp(`^[ ]{0,3}\`{${fenceLength}}[ \\t]*$`);
+  return pattern.test(lineContent);
+}
+
+// Strips exactly one trailing line terminator (`\n`, optionally preceded by
+// `\r`) from a line for grammar-matching purposes only — the original line,
+// terminator included, is always what gets appended to a buffer/segment, so
+// reassembly is byte-identical (design.md D4 row 6, D5 invariant 1).
+function stripLineTerminatorForMatching(line) {
+  return line.replace(/\r?\n$/, "");
+}
+
+/**
+ * Splits `text` into an ordered array of `{ text, exempt }` segments per the
+ * noredact fence grammar (design.md D4). `exempt` segments are fully-formed
+ * fenced blocks (opening fence line through closing fence line inclusive)
+ * whose content must not be scanned; all other text is `exempt: false`.
+ *
+ * Two invariants hold for every input (design.md D5), both asserted as
+ * properties in test/redact.test.js:
+ *   1. Round-trip: `segments.map(s => s.text).join("") === text`.
+ *   2. No empty segments are ever emitted.
+ *
+ * An unterminated opening fence (no matching closer before EOF) is
+ * reclassified as non-exempt in its entirety, including the orphan opening
+ * fence line — nothing is dropped, nothing is exempted (fail-safe default).
+ */
+export function splitNoRedactSegments(text) {
+  if (typeof text !== "string" || text.length === 0) {
+    return [];
+  }
+
+  const lines = text.split(/(?<=\n)/);
+  const segments = [];
+
+  let plainBuffer = "";
+  let exemptBuffer = "";
+  let openFenceLength = null; // null when outside a fence
+
+  for (const line of lines) {
+    const matchContent = stripLineTerminatorForMatching(line);
+
+    if (openFenceLength === null) {
+      const fenceLength = matchOpenFence(matchContent);
+      if (fenceLength !== null) {
+        if (plainBuffer.length > 0) {
+          segments.push({ text: plainBuffer, exempt: false });
+          plainBuffer = "";
+        }
+        openFenceLength = fenceLength;
+        exemptBuffer = line;
+      } else {
+        plainBuffer += line;
+      }
+    } else if (matchCloseFence(matchContent, openFenceLength)) {
+      exemptBuffer += line;
+      segments.push({ text: exemptBuffer, exempt: true });
+      exemptBuffer = "";
+      openFenceLength = null;
+    } else {
+      exemptBuffer += line;
+    }
+  }
+
+  if (openFenceLength !== null) {
+    // Unterminated opening fence at EOF: reclassify the buffered content
+    // (including the orphan opening fence line) as non-exempt.
+    plainBuffer += exemptBuffer;
+  }
+  if (plainBuffer.length > 0) {
+    segments.push({ text: plainBuffer, exempt: false });
+  }
+
+  return segments;
+}
+
 /**
  * Builds the model-facing note appended after redaction, naming the
  * concrete prohibited action (writing a placeholder back) so the model does
@@ -239,16 +347,24 @@ export function buildAnnotation(count, ruleIds) {
 }
 
 /**
- * Orchestrates the full detect -> merge -> splice pipeline. `lint` is
- * injected so this function is testable with a stub and, through the same
- * seam, integration-testable with the real secretlint linter.
+ * Orchestrates the full detect -> merge -> splice pipeline, WITHOUT
+ * appending any model-facing annotation. `lint` is injected so this
+ * function is testable with a stub and, through the same seam,
+ * integration-testable with the real secretlint linter.
  *
  * Returns `{ text, redactionCount, ruleIds }` — `text` is the original
- * string unchanged whenever nothing is redacted (including on a scanner
- * error, per the fail-open contract), or the redacted string plus a
- * trailing annotation when at least one finding was merged and spliced.
+ * value unchanged whenever nothing is redacted (including on a scanner
+ * error, per the fail-open contract; this may be a non-string value such as
+ * `undefined`, which is intentionally returned as-is, not coerced), or the
+ * redacted string when at least one finding was merged and spliced.
+ *
+ * Annotation-free by design: two callers build different annotations on top
+ * of this shared core — `redactSecrets` (tool output) and
+ * `redactUserMessage` (user messages, which additionally applies the
+ * `noredact` fence exemption and aggregates across message parts). See
+ * design.md D1.
  */
-export async function redactSecrets(text, { lint }) {
+export async function scanAndRedact(text, { lint }) {
   if (typeof text !== "string" || text.length === 0 || !looksLikeSecret(text)) {
     return { text, redactionCount: 0, ruleIds: [] };
   }
@@ -268,7 +384,95 @@ export async function redactSecrets(text, { lint }) {
 
   const redacted = spliceRedactions(text, merged);
   const ruleIds = [...new Set(merged.flatMap((interval) => [...interval.ruleIds].map(shortRuleId)))];
-  const annotated = `${redacted}\n\n${buildAnnotation(merged.length, ruleIds)}`;
 
-  return { text: annotated, redactionCount: merged.length, ruleIds };
+  return { text: redacted, redactionCount: merged.length, ruleIds };
+}
+
+/**
+ * Thin wrapper around `scanAndRedact` for the tool-output redaction path:
+ * appends the tool-output annotation after all redaction placeholders when
+ * at least one finding was redacted. Behavior-preserving by construction —
+ * see the refactor-safety baseline in test/redact-baseline.test.js.
+ */
+export async function redactSecrets(text, { lint }) {
+  const result = await scanAndRedact(text, { lint });
+  if (result.redactionCount === 0) {
+    return result;
+  }
+
+  return {
+    text: `${result.text}\n\n${buildAnnotation(result.redactionCount, result.ruleIds)}`,
+    redactionCount: result.redactionCount,
+    ruleIds: result.ruleIds,
+  };
+}
+
+/**
+ * Orchestrates redaction for a single user-authored (non-synthetic) text
+ * part: a whole-text `looksLikeSecret` fast path (sound because every
+ * anchor is a substring/regex match, so no anchor in the whole text implies
+ * none in any substring — design.md D5), then `splitNoRedactSegments` to
+ * honor the `noredact` fence, then `scanAndRedact` on each non-exempt
+ * segment. Exempt segments pass through byte-identical. Results are
+ * concatenated in source order; `redactionCount` is summed and `ruleIds`
+ * is the de-duplicated, sorted union across all scanned segments.
+ *
+ * Deliberately annotation-free (like `scanAndRedact`) — only the
+ * `chat.message` hook, which sees every part of a message, can aggregate a
+ * single annotation across parts. See `buildUserMessageAnnotation` and
+ * design.md D1/D6.
+ */
+export async function redactUserMessage(text, { lint }) {
+  if (typeof text !== "string" || text.length === 0 || !looksLikeSecret(text)) {
+    return { text, redactionCount: 0, ruleIds: [] };
+  }
+
+  const segments = splitNoRedactSegments(text);
+  const resultParts = [];
+  let redactionCount = 0;
+  const ruleIdSet = new Set();
+
+  for (const segment of segments) {
+    if (segment.exempt) {
+      resultParts.push(segment.text);
+      continue;
+    }
+    const scanned = await scanAndRedact(segment.text, { lint });
+    resultParts.push(scanned.text);
+    redactionCount += scanned.redactionCount;
+    for (const ruleId of scanned.ruleIds) {
+      ruleIdSet.add(ruleId);
+    }
+  }
+
+  return {
+    text: resultParts.join(""),
+    redactionCount,
+    ruleIds: [...ruleIdSet].sort(),
+  };
+}
+
+/**
+ * Builds the model-facing note appended once per user message when at
+ * least one redaction occurred across its parts. Unlike `buildAnnotation`
+ * (tool output, where the model is told to ask the user for the value),
+ * this note addresses a redaction of the user's OWN message — re-asking
+ * would loop or coach the model toward soliciting a bypass, so it instead
+ * instructs the model to say so and stop. Deliberately makes NO mention of
+ * the `noredact` fence or any exemption mechanism (design.md's user
+ * decision on annotation content) — teaching the model such a convention
+ * would teach it a documented bypass of this security control, since
+ * `chat.message` also fires for messages the model itself authored (e.g.
+ * subagent/task-tool prompts).
+ */
+export function buildUserMessageAnnotation(count, ruleIds) {
+  const labels = [...new Set(ruleIds)].sort().join("+");
+  return (
+    `[opencode-redact] ${count} secret(s) in this user message were detected and replaced ` +
+    `with ***REDACTED:...*** placeholders (rules: ${labels}). A placeholder is NOT the ` +
+    `real value and is NOT part of what the user typed. Never write, copy, echo, or commit ` +
+    `a ***REDACTED:...*** placeholder into a file, command, or message — doing so would ` +
+    `overwrite real content with this marker. Do not attempt to recover, reconstruct, or ` +
+    `guess a redacted value; if the task cannot proceed without it, say so and stop.`
+  );
 }
