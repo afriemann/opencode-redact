@@ -1,13 +1,13 @@
 ## 1. Dependencies
 
-- [ ] 1.1 Add `jsonc-parser@3.3.1` and `xdg-basedir@5.1.0` to `package.json`/lockfile; verify `npm install` succeeds and both packages resolve at the pinned versions.
-- [ ] 1.2 Read the installed `jsonc-parser@3.3.1` package's actual exported API (do not assume from memory) to confirm its error-collecting parse call shape, and confirm whether `xdg-basedir`'s `xdgConfig` can be `undefined` on this plugin's supported platforms; record findings as inline comments where used in `src/config.js`.
+- [x] 1.1 Add `jsonc-parser@3.3.1` and `xdg-basedir@5.1.0` to `package.json`/lockfile; verify `npm install` succeeds and both packages resolve at the pinned versions.
+- [x] 1.2 Read the installed `jsonc-parser@3.3.1` package's actual exported API (do not assume from memory) to confirm its error-collecting parse call shape, and confirm whether `xdg-basedir`'s `xdgConfig` can be `undefined` on this plugin's supported platforms; record findings as inline comments where used in `src/config.js`.
 
 ## 2. Plugin configuration (`src/config.js`)
 
-- [ ] 2.1 Implement `resolveConfigPath()` (injectable override for tests) resolving `<xdgConfig>/opencode/redact.jsonc` via `xdg-basedir`, and `loadPluginConfig({ configPath })` returning `{ disableHighEntropy: boolean }`, defaulting to `false`; verify unit tests cover every row of design.md's D7 failure ladder: absent file (silent defaults), unreadable file (warn), invalid JSONC syntax (warn, whole-file defaults), non-object root (warn, whole-file defaults), wrong-typed known key (warn naming the key, per-key default, other keys still applied), unknown key (warn naming the key only, known keys still applied), valid file (one info-level log line).
-- [ ] 2.2 Verify a unit test asserts no log call from `loadPluginConfig` ever includes a configuration value — only key names — for every failure-ladder row that logs.
-- [ ] 2.3 Verify `loadPluginConfig` never throws or rejects for any input (malformed file, unreadable path, non-JSON content) — a dedicated test per failure mode confirms it always resolves.
+- [x] 2.1 Implement `resolveConfigPath()` (injectable override for tests) resolving `<xdgConfig>/opencode/redact.jsonc` via `xdg-basedir`, and `loadPluginConfig({ configPath })` returning `{ disableHighEntropy: boolean }`, defaulting to `false`; verify unit tests cover every row of design.md's D7 failure ladder: absent file (silent defaults), unreadable file (warn), invalid JSONC syntax (warn, whole-file defaults), non-object root (warn, whole-file defaults), wrong-typed known key (warn naming the key, per-key default, other keys still applied), unknown key (warn naming the key only, known keys still applied), valid file (one info-level log line).
+- [x] 2.2 Verify a unit test asserts no log call from `loadPluginConfig` ever includes a configuration value — only key names — for every failure-ladder row that logs.
+- [x] 2.3 Verify `loadPluginConfig` never throws or rejects for any input (malformed file, unreadable path, non-JSON content) — a dedicated test per failure mode confirms it always resolves.
 
 ## 3. Entropy detection core (`src/entropy-rule.js`)
 
