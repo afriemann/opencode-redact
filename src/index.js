@@ -1,4 +1,5 @@
-import { createSecretlintConfig, createLinter } from "./secretlint.js";
+import { createSecretlintConfig, createCompositeLinter } from "./secretlint.js";
+import { loadPluginConfig } from "./config.js";
 import { redactSecrets, redactUserMessage, buildUserMessageAnnotation } from "./redact.js";
 
 /**
@@ -13,14 +14,27 @@ import { redactSecrets, redactUserMessage, buildUserMessageAnnotation } from "./
  * @param {{ client: import("@opencode-ai/plugin").PluginInput["client"] }} input
  * @param {{
  *   _createSecretlintConfigOverride?: () => Promise<unknown>,
- *   _createLinterOverride?: (config: unknown) => (text: string, opts?: unknown) => Promise<unknown>,
+ *   _createLinterOverride?: (config: unknown, options?: unknown) => (text: string, opts?: unknown) => Promise<unknown>,
+ *   _loadPluginConfigOverride?: (params?: unknown) => Promise<{ disableHighEntropy: boolean }>,
  * }} [testOverrides]
  *   Internal test seam only — never used by opencode itself.
  */
 export default async function OpencodeRedact({ client }, testOverrides = {}) {
+  const loadPlugConfig = testOverrides._loadPluginConfigOverride ?? loadPluginConfig;
   const loadConfig = testOverrides._createSecretlintConfigOverride ?? createSecretlintConfig;
-  const buildLinter = testOverrides._createLinterOverride ?? createLinter;
+  const buildLinter = testOverrides._createLinterOverride ?? createCompositeLinter;
 
+  // Step 1 (design.md D8): the plugin's own optional settings file. Never
+  // throws or rejects, by loadPluginConfig's own contract — no try/catch
+  // needed, and this step MUST NOT share a try block with step 2 below, so
+  // a config-file problem can never be reported inside, or mistaken for,
+  // the fail-loud secretlint-config failure.
+  const pluginConfig = await loadPlugConfig({
+    log: (level, message) => logSafely(client, level, message),
+  });
+
+  // Step 2: the secretlint rule bundle itself. May throw — fail loud,
+  // unchanged from before this change.
   let config;
   try {
     config = await loadConfig();
@@ -29,7 +43,8 @@ export default async function OpencodeRedact({ client }, testOverrides = {}) {
     throw err;
   }
 
-  const lint = buildLinter(config);
+  // Step 3: compose the anchored and high-entropy bundles into one linter.
+  const lint = buildLinter(config, { disableHighEntropy: pluginConfig.disableHighEntropy });
 
   return {
     "tool.execute.after": async (input, output) => {

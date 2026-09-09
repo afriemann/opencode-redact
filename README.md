@@ -99,6 +99,45 @@ rationale.
   just skip redaction, so failures here are always swallowed and logged
   rather than propagated.
 
+## High-entropy secret detection
+
+All of the rules above are vendor-pattern based — each requires a literal
+prefix or format (`sk-ant-`, `ghp_`, `-----BEGIN`, etc.). A credential with no
+recognizable format — an internal API key, a bespoke session token — passes
+through every one of them undetected. This plugin additionally runs a
+Shannon-entropy check that flags secret-*shaped* substrings regardless of
+vendor, alongside (not instead of) the pattern-based rules.
+
+- **How it works**: candidate substrings (runs of base64/hex/base64url
+  characters) are scored for randomness. A run is flagged when its entropy
+  exceeds **4.5 bits/character** (base64-shaped) or **3.0 bits/character**
+  (hex-shaped) — the same thresholds [detect-secrets](https://github.com/Yelp/detect-secrets)
+  uses. Below a minimum length (23 for base64, 9 for hex — the shortest
+  length at which each threshold is even mathematically reachable) nothing
+  is scored at all.
+- **Always runs, unlike every other rule.** The existing prescreen only
+  works because every anchored rule requires a literal token; an
+  entropy-based secret has no such anchor; this check runs on every scanned
+  message, tool output and user message alike, at the cost of the extra
+  scan.
+- **Built-in allowlist** — never flagged, regardless of measured entropy:
+  - a git commit id or common hash digest, in **one consistent letter
+    case** (lowercase or uppercase, never mixed): 7–12 hex characters (an
+    abbreviated commit id) or exactly 32/40/64/128 (md5/sha1/sha256/sha512
+    digest lengths);
+  - a canonical UUID (`8-4-4-4-12` hyphenated hex, any case);
+  - a Subresource Integrity / lockfile hash (`sha256-<base64>`,
+    `sha1-`/`sha384-`/`sha512-` likewise) — this is specifically what keeps
+    `npm install`'s own `package-lock.json` from tripping this plugin on
+    every dependency.
+- **JWTs are handled specially.** A JWT's header and payload are not scored
+  (they're expected to be readable claims, not secret material); its
+  signature segment — the part that actually makes the token usable — is
+  flagged unconditionally, with no entropy check at all, since even a short
+  signature must never survive. In the current version this still redacts
+  the **entire token** as one placeholder (not just the signature) — see
+  "Known limitations" below for why.
+
 ## Install
 
 ```bash
@@ -119,10 +158,46 @@ this plugin needs no additional symlink step for its own dependencies — a
 plain `npm install` inside this repo is sufficient. `@opencode-ai/plugin` is
 referenced only through erased JSDoc types, never imported at runtime.
 
+## Configuration
+
+This plugin has exactly one setting, in v1: whether high-entropy detection
+is on. Everything else — which vendor rules run, thresholds, the allowlist —
+is fixed and not configurable.
+
+Create `redact.jsonc` (JSON with comments; trailing commas are fine) in
+opencode's own configuration directory — the same directory the `plugins/`
+folder above lives in (`$XDG_CONFIG_HOME/opencode/redact.jsonc`, i.e.
+`~/.config/opencode/redact.jsonc` by default):
+
+```jsonc
+{
+  // Turn off the high-entropy check; every other rule keeps running.
+  "disableHighEntropy": true
+}
+```
+
+- The file is entirely optional — no file means every default applies
+  (high-entropy detection **on**).
+- **Fails open on every problem**, exactly like the rest of this plugin:
+  a missing file is silent; a file that can't be read, doesn't parse as
+  valid JSONC, or has the wrong shape falls back to every default and logs
+  a warning (never the file's actual contents — only key names and error
+  categories are ever logged). This is deliberately the opposite failure
+  direction from the secretlint rule bundle itself, which still fails
+  loud on startup if it can't load — a broken settings file should never
+  cost you detection coverage, but a broken rule bundle should never run
+  silently unprotected.
+- Restart opencode after changing this file — it's read once at plugin
+  startup, not watched for changes.
+
 ## Rollback / disabling
 
-There is no config flag to turn this off in v1. The fast "turn it off" path
-is removing the symlink and restarting opencode:
+There is still no way to turn off vendor-pattern detection (the
+`tool.execute.after`/`chat.message` hooks themselves) in v1 — the only
+partial control is `disableHighEntropy` in `redact.jsonc` (see
+"Configuration" above), which turns off just the entropy check. The fast
+"turn everything off" path remains removing the symlink and restarting
+opencode:
 
 ```bash
 rm ~/.config/opencode/plugins/opencode-redact.js
@@ -150,13 +225,15 @@ rm ~/.config/opencode/plugins/opencode-redact.js
   secret-access-key check is reachable. (Access key IDs alone are not
   secrets, so this is by design, not a gap.)
 - **Detection is heuristic, not a guarantee.** The recommend preset is
-  vendor-pattern-based and will not catch bespoke or opaque secret formats.
+  vendor-pattern-based and will not catch bespoke or opaque secret formats
+  — mitigated, but not eliminated, by high-entropy detection (see above).
 - **Over-redaction is possible** on dense, single-line content (e.g.
   minified JSON) — a finding there expands to the whole line. This is the
   safe direction for a security control, and the annotation warns the model
   not to write the placeholder back.
-- **No config surface of any kind** — no config file, no environment
-  variable, no per-rule enable/disable, no allowlist.
+- **Configuration is limited to one setting** (`disableHighEntropy` in
+  `redact.jsonc` — see "Configuration" above); no per-rule enable/disable
+  beyond that, no custom allowlist, no threshold tuning.
 - **Hook ordering relative to other `tool.execute.after` plugins is
   undefined** — opencode runs hooks sequentially in registration order.
 - **Live streaming preview is not redacted.** opencode's `bash` tool
@@ -200,6 +277,33 @@ rm ~/.config/opencode/plugins/opencode-redact.js
   bash live-preview gap. This has not yet been empirically confirmed (unlike
   the tool-output case, which was directly tested) — treat it as a
   suspected, not verified, human-visible-only gap until confirmed.
+- **The high-entropy allowlist can be reused to smuggle a real secret.**
+  Any string shaped like an allowlisted form — a git commit id, a UUID, a
+  common hash-digest length, an SRI hash — is never flagged, even if it is
+  reused as an actual credential rather than what it appears to be. This is
+  an accepted trade-off to keep the false-positive rate bounded; it is not
+  possible to distinguish "looks like a git SHA" from "is a git SHA" by
+  content alone.
+- **A JWT's claims are not preserved, despite signature-only targeting.**
+  The entropy rule reports only the JWT's signature segment as a finding,
+  but the existing token-boundary-expansion logic (unchanged, shared with
+  every other rule) widens any finding to the surrounding whitespace — and
+  a JWT has none internally — so the entire token is replaced by one
+  placeholder in this version. The security goal (the token becomes
+  unusable) is achieved in full; only the debugging convenience of keeping
+  the claims readable is not.
+- **An unsigned JWT (`alg: none`, empty signature) is not redacted at
+  all.** Its header and payload are exempt from generic scoring by design
+  (they're expected to be readable claims), and with no signature segment
+  to unconditionally flag, nothing is reported. An unsigned token is not a
+  bearer credential, so this is the intended outcome, but it does mean its
+  claims pass through completely unprotected if they happen to contain
+  something sensitive.
+- **Case-uniform git-object-id/hash-digest lengths outside {7-12, 32, 40,
+  64, 128} are not exempt** and are scored normally — this is deliberate
+  (those are the lengths git and common hash algorithms actually produce),
+  but a hex string of some other length that happens to *look* like a
+  digest is not specially treated.
 
 ## Development
 

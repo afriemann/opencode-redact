@@ -1,9 +1,7 @@
 // spec: openspec/specs/tool-output-redaction/spec.md
 // spec: openspec/changes/add-user-message-redaction/specs/user-message-redaction/spec.md
 import { describe, it, expect, vi } from "vitest";
-import { RULE_FIXTURES } from "./fixtures.js";
 import {
-  looksLikeSecret,
   normalizeRanges,
   expandToTokenBoundaries,
   mergeIntervals,
@@ -15,30 +13,6 @@ import {
   redactUserMessage,
   buildUserMessageAnnotation,
 } from "../src/redact.js";
-
-describe("looksLikeSecret", () => {
-  it("does not skip a positive fixture for any rule", () => {
-    for (const fixture of RULE_FIXTURES) {
-      expect(
-        looksLikeSecret(fixture.content),
-        `expected looksLikeSecret to return true for rule '${fixture.rule}' fixture`,
-      ).toBe(true);
-    }
-  });
-
-  it("returns false for clean, unremarkable text", () => {
-    expect(looksLikeSecret("the quick brown fox jumps over the lazy dog")).toBe(false);
-  });
-
-  it("returns false for an empty string", () => {
-    expect(looksLikeSecret("")).toBe(false);
-  });
-
-  it("is case-insensitive", () => {
-    expect(looksLikeSecret("AWS_SECRET_ACCESS_KEY=x")).toBe(true);
-    expect(looksLikeSecret("aws_secret_access_key=x")).toBe(true);
-  });
-});
 
 describe("expandToTokenBoundaries", () => {
   it("expands a range left and right to the nearest whitespace", () => {
@@ -239,12 +213,12 @@ describe("redactSecrets", () => {
     expect(lint).not.toHaveBeenCalled();
   });
 
-  it("returns the input unchanged and never calls lint for clean text (prescreen negative)", async () => {
-    const lint = vi.fn();
+  it("calls lint even for clean, anchor-free text (the anchor prescreen is the injected lint's own responsibility, not scanAndRedact's)", async () => {
+    const lint = vi.fn().mockResolvedValue([]);
     const text = "the quick brown fox jumps over the lazy dog";
     const result = await redactSecrets(text, { lint });
     expect(result).toEqual({ text, redactionCount: 0, ruleIds: [] });
-    expect(lint).not.toHaveBeenCalled();
+    expect(lint).toHaveBeenCalledWith(text);
   });
 
   it("returns the original text unchanged when lint throws (fail open)", async () => {
@@ -344,12 +318,12 @@ describe("redactUserMessage", () => {
     expect(lint).not.toHaveBeenCalled();
   });
 
-  it("returns the input unchanged and never calls lint for clean text (whole-part prescreen fast path)", async () => {
-    const lint = vi.fn();
+  it("calls lint even for clean, anchor-free text (the anchor prescreen is the injected lint's own responsibility, not redactUserMessage's)", async () => {
+    const lint = vi.fn().mockResolvedValue([]);
     const text = "the quick brown fox jumps over the lazy dog";
     const result = await redactUserMessage(text, { lint });
     expect(result).toEqual({ text, redactionCount: 0, ruleIds: [] });
-    expect(lint).not.toHaveBeenCalled();
+    expect(lint).toHaveBeenCalledWith(text);
   });
 
   it("redacts a secret found outside any fence, appending no annotation itself", async () => {
@@ -366,8 +340,9 @@ describe("redactUserMessage", () => {
 
   it("leaves a noredact-fenced secret completely untouched, proving the exemption works (checksum example)", async () => {
     // A checksum that would otherwise trip a rule's anchor if scanned; wrapping it
-    // in a noredact fence must leave it byte-identical, and the scanner must never
-    // even be invoked for that segment.
+    // in a noredact fence must leave it byte-identical, and lint must never be
+    // called with the fenced segment's content, regardless of the surrounding
+    // (non-fenced) text's own anchor status.
     const checksum = "aws_secret_access_key=AAAAAAAAAAAAAAAAAAAA";
     const text = `Here is a checksum:\n\`\`\`noredact\n${checksum}\n\`\`\`\nthanks!`;
     const lint = vi.fn().mockResolvedValue([]);
@@ -376,10 +351,12 @@ describe("redactUserMessage", () => {
     expect(result.text).toContain(checksum);
     expect(result.redactionCount).toBe(0);
     expect(result.ruleIds).toEqual([]);
-    // The fenced segment's own content contains the "secret" anchor, so if the
-    // fence were not honored, lint would have been called for it. The other
-    // (non-fenced) text contains no anchor, so lint is never invoked at all.
-    expect(lint).not.toHaveBeenCalled();
+    // lint is called for the surrounding non-fenced segments (prescreening is
+    // no longer redactUserMessage's own responsibility — see design.md D2),
+    // but never with any text containing the fenced checksum.
+    for (const [callText] of lint.mock.calls) {
+      expect(callText).not.toContain(checksum);
+    }
   });
 
   it("redacts a secret outside the fence while leaving the fenced segment untouched, in the same message", async () => {
