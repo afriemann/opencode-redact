@@ -168,7 +168,14 @@ const UPPERCASE_PATTERN = /[A-Z]/;
 // threshold above but contains a 5-character all-lowercase run (`right`)
 // and is correctly rejected here; a genuine password with the same
 // entropy but no such run survives.
-const LONG_CLASS_RUN_PATTERN = /[a-z]{4}|[A-Z]{4}|[0-9]{4}|[!#$%^+~@_-]{4}/;
+//
+// The {n} quantifier is built from MAX_CLASS_RUN + 1 (not written as a
+// separate literal 4) so the two constants can never drift apart.
+const MAX_CLASS_RUN = 3;
+const LONG_CLASS_RUN_QUANTIFIER = MAX_CLASS_RUN + 1;
+const LONG_CLASS_RUN_PATTERN = new RegExp(
+  `[a-z]{${LONG_CLASS_RUN_QUANTIFIER}}|[A-Z]{${LONG_CLASS_RUN_QUANTIFIER}}|[0-9]{${LONG_CLASS_RUN_QUANTIFIER}}|[!#$%^+~@_-]{${LONG_CLASS_RUN_QUANTIFIER}}`,
+);
 
 /**
  * Returns every maximal run of the password-shaped charset in `text`, in
@@ -269,7 +276,24 @@ export function findHighEntropyFindings(text) {
   }
 
   findings.sort((a, b) => a.start - b.start);
-  return findings;
+
+  // A run can independently clear both the existing hex path and the new
+  // password path (e.g. a mixed-case, 14-22 character, all-hex run whose
+  // entropy exceeds both 3.0 and 3.75) — the two tokenization passes are
+  // deliberately independent and neither is aware of the other's result.
+  // De-duplicate identical ranges here so this function's own contract is
+  // "one finding per distinct range", rather than relying on
+  // `mergeIntervals` downstream (in src/redact.js) to absorb the
+  // duplicate silently.
+  const deduplicated = [];
+  for (const finding of findings) {
+    const previous = deduplicated[deduplicated.length - 1];
+    if (previous && previous.start === finding.start && previous.end === finding.end) {
+      continue;
+    }
+    deduplicated.push(finding);
+  }
+  return deduplicated;
 }
 
 // D6: the message is a constant with no interpolated props. It never

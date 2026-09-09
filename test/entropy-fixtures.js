@@ -99,7 +99,7 @@ export const SHORT_PASSWORD_FIXTURES = [
     expectFinding: true,
   },
   {
-    name: "P3: 20 chars, no symbols (symbols are optional), r=2 repeats, H = log2(18) - 2*2/20 ~= 4.1219280949",
+    name: "P3: 20 chars, no symbols (symbols are optional), r=2 repeats, H = log2(20) - 2*2/20 ~= 4.1219280949",
     content: "aB1mcD3NeF5mgH7NiJkL",
     expectFinding: true,
   },

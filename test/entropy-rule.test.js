@@ -339,45 +339,45 @@ describe("hasLongClassRun", () => {
 });
 
 describe("findHighEntropyFindings — short password-shaped path", () => {
-  it("reports a 14-character password-shaped fixture at the floor (pins the floor from above)", () => {
+  it("flags a password-shaped substring meeting every condition (14-character fixture at the floor)", () => {
     const fixture = "aB3!cD7#eF2$gH";
     expect(fixture).toHaveLength(14);
     const findings = findHighEntropyFindings(fixture);
     expect(findings).toEqual([{ start: 0, end: 14 }]);
   });
 
-  it("reports a 22-character password-shaped fixture at the ceiling", () => {
+  it("flags a password-shaped substring meeting every condition (22-character fixture at the ceiling)", () => {
     const fixture = "aB1!cD2#eF3$gH4%iJ5^kL";
     expect(fixture).toHaveLength(22);
     expect(findHighEntropyFindings(fixture)).toEqual([{ start: 0, end: 22 }]);
   });
 
-  it("reports a password-shaped fixture with no symbols at all (symbols are optional)", () => {
+  it("symbols are optional, not required", () => {
     const fixture = "aB1mcD3NeF5mgH7NiJkL";
     expect(fixture).toHaveLength(20);
     expect(findHighEntropyFindings(fixture)).toEqual([{ start: 0, end: 20 }]);
   });
 
-  it("does not report a 13-character fixture (pins the floor from below)", () => {
+  it("does not flag a substring below the 14-character floor", () => {
     const fixture = "aB3!cD7#eF2$g";
     expect(fixture).toHaveLength(13);
     expect(findHighEntropyFindings(fixture)).toEqual([]);
   });
 
-  it("does not report a fixture with entropy exactly at the threshold (pins > not >=)", () => {
+  it("does not flag a substring at or below the entropy threshold (pins > not >=)", () => {
     const fixture = "aBc3!DeF7#gH2$aB";
     expect(fixture).toHaveLength(16);
     expect(shannonEntropy(fixture)).toBeCloseTo(3.75, 9);
     expect(findHighEntropyFindings(fixture)).toEqual([]);
   });
 
-  it("does not report a low-entropy repeated-pattern fixture even at floor-clearing length", () => {
+  it("does not flag a low-entropy repeated-pattern fixture even at floor-clearing length", () => {
     const fixture = "Ab1!".repeat(4);
     expect(fixture).toHaveLength(16);
     expect(findHighEntropyFindings(fixture)).toEqual([]);
   });
 
-  it("does not report a fixture missing the uppercase letter, despite clearing length and entropy", () => {
+  it("does not flag a substring missing a required letter case", () => {
     const fixture = "a1!b2#c3$d4%e5^f";
     expect(fixture).toHaveLength(16);
     expect(shannonEntropy(fixture)).toBeCloseTo(4.0, 9);
@@ -391,10 +391,11 @@ describe("findHighEntropyFindings — short password-shaped path", () => {
     expect(findHighEntropyFindings(fixture)).toEqual([{ start: 0, end: 16 }]);
   });
 
-  it("does not report a fixture rejected by the class-run cap despite identical entropy to a reported fixture (run cap is the only discriminator)", () => {
+  it("does not flag a substring with a same-class character run of four or more", () => {
     const fixture = "acegikBDFHJL12345!#$%^";
     expect(fixture).toHaveLength(22);
     expect(shannonEntropy(fixture)).toBeCloseTo(4.4594316186, 9);
+    expect(hasLongClassRun(fixture)).toBe(true);
     expect(findHighEntropyFindings(fixture)).toEqual([]);
   });
 
@@ -439,6 +440,21 @@ describe("findHighEntropyFindings — short password-shaped path", () => {
     // finding inside the header or payload segments.
     expect(findings).toHaveLength(1);
     expect(text.slice(findings[0].start, findings[0].end)).toBe(signature);
+  });
+
+  it("does not double-report identical ranges when both the existing hex path and the short password path independently score the same run", () => {
+    // 16 distinct hex-alphabet characters (0-9a-fA-F), all-distinct so
+    // H = log2(16) = 4.0 -- clears the EXISTING hex path (threshold 3.0,
+    // min length 9) AND the new password path (threshold 3.75, length
+    // 14-22, case-mix, no long run) independently. The two tokenization
+    // passes are deliberately unaware of each other; this fixture proves
+    // findHighEntropyFindings itself de-duplicates the resulting identical
+    // range rather than relying on mergeIntervals downstream to absorb it.
+    const fixture = "0aA1bB2cC3dD4eE5";
+    expect(fixture).toHaveLength(16);
+    expect(shannonEntropy(fixture)).toBeCloseTo(4.0, 9);
+    const findings = findHighEntropyFindings(fixture);
+    expect(findings).toEqual([{ start: 0, end: 16 }]);
   });
 });
 
