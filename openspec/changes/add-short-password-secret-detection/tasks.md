@@ -19,12 +19,12 @@
 
 ## 5. Integration tests
 
-- [ ] 5.1 Add an end-to-end test (through the real composite linter, both hooks) proving a genuine short password-shaped secret (e.g. a P1/P2-style fixture) is redacted as `***REDACTED:high-entropy***` in both tool output and a user message.
-- [ ] 5.2 Add an end-to-end test proving the two adversarial regression-guard fixtures (a camelCase/PascalCase-style identifier, and a fixture that clears the threshold only via the run-cap check) are NOT redacted, through the real composite linter.
-- [ ] 5.3 Add an end-to-end test proving an SRI hash and a signed JWT still behave exactly as before (SRI passes through untouched; JWT redacts only as the existing single whole-token placeholder), confirming the new path introduces no regression to either existing guarantee.
-- [ ] 5.4 Verify the full test suite passes with zero failures and zero suppressed diagnostics.
+- [x] 5.1 Add an end-to-end test (through the real composite linter, both hooks) proving a genuine short password-shaped secret (e.g. a P1/P2-style fixture) is redacted as `***REDACTED:high-entropy***` in both tool output and a user message.
+- [x] 5.2 Add an end-to-end test proving the two adversarial regression-guard fixtures (a camelCase/PascalCase-style identifier, and a fixture that clears the threshold only via the run-cap check) are NOT redacted, through the real composite linter.
+- [x] 5.3 Add an end-to-end test proving an SRI hash and a signed JWT still behave exactly as before (SRI passes through untouched; JWT redacts only as the existing single whole-token placeholder), confirming the new path introduces no regression to either existing guarantee.
+- [x] 5.4 Verify the full test suite passes with zero failures and zero suppressed diagnostics.
 
 ## 6. Documentation
 
-- [ ] 6.1 Update README.md's "High-entropy secret detection" section: document the new short/password-shaped path, its exact character set (list every included punctuation character and note common exclusions like `.`, `,`, `=`, `&`, `*`, `?`), its length range (14-22), and its three combined conditions (case-mix, run-cap, entropy threshold).
-- [ ] 6.2 Add a new "Known limitations" entry documenting the accepted precision-over-recall trade-off: many real short passwords (especially word-based ones, e.g. `Hunter2024!`) will still not be caught, and this is deliberate given the calibration evidence (ordinary identifiers of the same length are otherwise indistinguishable from random passwords by entropy alone).
+- [x] 6.1 Update README.md's "High-entropy secret detection" section: document the new short/password-shaped path, its exact character set (list every included punctuation character and note common exclusions like `.`, `,`, `=`, `&`, `*`, `?`), its length range (14-22), and its three combined conditions (case-mix, run-cap, entropy threshold).
+- [x] 6.2 Add a new "Known limitations" entry documenting the accepted precision-over-recall trade-off: many real short passwords (especially word-based ones, e.g. `Hunter2024!`) will still not be caught, and this is deliberate given the calibration evidence (ordinary identifiers of the same length are otherwise indistinguishable from random passwords by entropy alone).

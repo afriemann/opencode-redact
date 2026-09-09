@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { describe, it, expect, vi } from "vitest";
 import OpencodeRedact from "../src/index.js";
 import { RULE_FIXTURES } from "./fixtures.js";
-import { ENTROPY_FIXTURES } from "./entropy-fixtures.js";
+import { ENTROPY_FIXTURES, SHORT_PASSWORD_FIXTURES } from "./entropy-fixtures.js";
 
 const SRC_DIR = fileURLToPath(new URL("../src/", import.meta.url));
 
@@ -436,5 +436,84 @@ describe("high-entropy secret detection (end-to-end, both hooks, real composite 
     const awsOutput = { output: awsFixture.content, metadata: {} };
     await hooks["tool.execute.after"]({ tool: "bash", sessionID: "s1", callID: "c1" }, awsOutput);
     expect(awsOutput.output).toContain("***REDACTED:");
+  });
+});
+
+describe("short password-shaped secret detection (end-to-end, both hooks, real composite linter)", () => {
+  const genuineFixture = SHORT_PASSWORD_FIXTURES.find((f) => f.name.startsWith("P1"));
+  const regressionGuardEntropy = SHORT_PASSWORD_FIXTURES.find((f) => f.name.startsWith("N6"));
+  const regressionGuardRunCap = SHORT_PASSWORD_FIXTURES.find((f) => f.name.startsWith("N7"));
+
+  function textPart(text, overrides = {}) {
+    return { type: "text", text, ...overrides };
+  }
+
+  it("redacts a genuine short password-shaped secret in tool output", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    const output = { output: genuineFixture.content, metadata: {} };
+    await hooks["tool.execute.after"]({ tool: "bash", sessionID: "s1", callID: "c1" }, output);
+    expect(output.output).toContain("***REDACTED:high-entropy***");
+    expect(output.output).not.toContain(genuineFixture.content);
+  });
+
+  it("redacts a genuine short password-shaped secret in a user message", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    const part = textPart(genuineFixture.content);
+    const output = { message: {}, parts: [part] };
+    await hooks["chat.message"]({ sessionID: "s1" }, output);
+    expect(part.text).toContain("***REDACTED:high-entropy***");
+    expect(part.text).not.toContain(genuineFixture.content);
+  });
+
+  it("does not redact a real identifier rejected by the entropy threshold alone (regression guard)", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    const output = { output: regressionGuardEntropy.content, metadata: {} };
+    await hooks["tool.execute.after"]({ tool: "bash", sessionID: "s1", callID: "c1" }, output);
+    expect(output.output).toBe(regressionGuardEntropy.content);
+  });
+
+  it("does not redact a real identifier rejected by the class-run cap alone, despite clearing the entropy threshold (regression guard)", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    const output = { output: regressionGuardRunCap.content, metadata: {} };
+    await hooks["tool.execute.after"]({ tool: "bash", sessionID: "s1", callID: "c1" }, output);
+    expect(output.output).toBe(regressionGuardRunCap.content);
+  });
+
+  it("does not disturb the existing SRI-hash allowlist guarantee", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    const sriFixture = ENTROPY_FIXTURES.find((f) => f.name.startsWith("allowlisted Subresource Integrity"));
+    const output = { output: sriFixture.content, metadata: {} };
+    await hooks["tool.execute.after"]({ tool: "bash", sessionID: "s1", callID: "c1" }, output);
+    expect(output.output).toBe(sriFixture.content);
+  });
+
+  it("does not disturb the existing signed-JWT single-placeholder guarantee", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    const jwtFixture = ENTROPY_FIXTURES.find((f) => f.name.startsWith("signed JWT"));
+    const output = { output: jwtFixture.content, metadata: {} };
+    await hooks["tool.execute.after"]({ tool: "bash", sessionID: "s1", callID: "c1" }, output);
+    const placeholderMatches = output.output.match(/\*\*\*REDACTED:high-entropy\*\*\*/g) ?? [];
+    expect(placeholderMatches).toHaveLength(1);
+    expect(output.output).not.toContain(jwtFixture.content);
+  });
+
+  it("matches every SHORT_PASSWORD_FIXTURES entry through the real composite linter", async () => {
+    const client = fakeClient();
+    const hooks = await OpencodeRedact({ client });
+    for (const fixture of SHORT_PASSWORD_FIXTURES) {
+      const output = { output: fixture.content, metadata: {} };
+      await hooks["tool.execute.after"]({ tool: "bash", sessionID: "s1", callID: "c1" }, output);
+      if (fixture.expectFinding) {
+        expect(output.output, `fixture '${fixture.name}' should have been redacted`).toContain("***REDACTED:");
+      } else {
+        expect(output.output, `fixture '${fixture.name}' should not have been redacted`).toBe(fixture.content);
+      }
+    }
   });
 });

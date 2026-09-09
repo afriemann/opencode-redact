@@ -138,6 +138,56 @@ vendor, alongside (not instead of) the pattern-based rules.
   the **entire token** as one placeholder (not just the signature) — see
   "Known limitations" below for why.
 
+**Short, password-shaped secrets.** The check above only fires at 23+
+characters (base64-shaped) or 9+ characters (hex-shaped) — a typed or
+generated password is often shorter, and frequently contains punctuation
+the check above doesn't even scan (`!`, `@`, `#`, etc. immediately split a
+run into fragments it never sees). A second, independent check
+specifically targets this case:
+
+- **Length: 14–22 characters.** An 8-character floor was the original
+  target, but it isn't mathematically deliverable together with a
+  false-positive-safe threshold — see below.
+- **Character set**: letters (upper + lower), digits, and exactly these
+  ten punctuation characters: `! # $ % ^ + - _ ~ @`. Common punctuation
+  such as `. , = & * ? / \ < > ( ) [ ] { } | " '` and the backtick is
+  deliberately excluded — each is a top contributor to false positives in
+  ordinary text (sentence punctuation, `key:value`/`.env`/query-string
+  shapes, Markdown emphasis, paths, quoting) when measured against this
+  project's own source and dependencies.
+- **A candidate must clear all three of the following** — none is
+  sufficient alone:
+  1. contains at least one lowercase **and** at least one uppercase
+     letter (digits and symbols are optional bonus signals, not
+     required);
+  2. contains **no run of 4 or more consecutive characters from the same
+     class** (lowercase, uppercase, digit, or symbol);
+  3. its Shannon entropy strictly exceeds **3.75 bits/character** — a
+     threshold calibrated specifically for this character set and length
+     range, not reused from the 4.5/3.0 thresholds above.
+- **How the thresholds were chosen.** Shannon entropy over a string's own
+  character distribution cannot, by itself, distinguish a random password
+  from an ordinary all-distinct-character identifier of the same length —
+  both reach the same `log2(length)` ceiling. Measured directly against
+  real identifiers in this project's own dependencies (`Configurable`,
+  `rightHandSymbols`, `$ZodBase64URL`, and others), several reach or
+  exceed the entropy of an equal-length random password. The
+  character-class-run cap (condition 2 above) is what restores the
+  separation: `rightHandSymbols` clears the entropy threshold but is
+  rejected by the run cap (`right` is five consecutive lowercase
+  characters); a genuine password with the same entropy but no such run
+  survives. With that cap in place, the lowest defensible threshold pushes
+  the floor to 14 characters — below that, an all-distinct ordinary
+  identifier and an all-distinct random password become mathematically
+  indistinguishable by entropy alone. This favors precision over recall,
+  deliberately: some real short passwords (especially word-based ones,
+  e.g. `Hunter2024!`) will still not be caught — see "Known limitations".
+- **Excludes JWT and existing-allowlist content.** A candidate inside a
+  JWT-shaped span, or inside an existing-path allowlisted run (e.g. a
+  Subresource Integrity hash's digest), is never independently evaluated
+  by this check — it defers entirely to the existing handling for that
+  content.
+
 ## Install
 
 ```bash
@@ -304,6 +354,25 @@ rm ~/.config/opencode/plugins/opencode-redact.js
   (those are the lengths git and common hash algorithms actually produce),
   but a hex string of some other length that happens to *look* like a
   digest is not specially treated.
+- **The short password-shaped check catches modest recall, by design.**
+  Many real short passwords — especially word-based ones such as
+  `Hunter2024!` — will not be flagged: the character-class-run cap that
+  keeps ordinary identifiers from flooding the results also rejects any
+  password built from dictionary words with few internal case/class
+  transitions. This is the accepted precision-over-recall trade-off (see
+  "High-entropy secret detection" above); it is not a bug.
+- **Short password-shaped secrets under 14 characters are never caught,
+  by any means.** Below that length, Shannon entropy alone cannot
+  distinguish a random password from an ordinary all-distinct-character
+  identifier — there is no threshold, with or without the run cap, that
+  would separate them, so shorter candidates are excluded entirely rather
+  than accepted at a degraded precision.
+- **A password containing punctuation outside the short check's 10-symbol
+  set (`. , = & * ? / \ < > ( ) [ ] { } | " '` and the backtick) is
+  invisible to that check** even within the 14–22 character window,
+  because such punctuation splits the candidate into shorter fragments the
+  same way it always has. A password built entirely from the 10 included
+  symbols plus letters and digits is unaffected.
 
 ## Development
 
