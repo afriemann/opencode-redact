@@ -48,8 +48,9 @@ export function resolveConfigPath() {
  *
  * @param {{ configPath?: string | null, log?: (level: string, message: string) => void | Promise<void> }} [params]
  *   `configPath` defaults to `resolveConfigPath()`; inject an explicit path
- *   (or `null`) in tests. `log` defaults to a no-op; the caller (src/index.js)
- *   wires this to the plugin's existing `logSafely` helper.
+ *   (or `null`) in tests. `log` defaults to a no-op; each adapter
+ *   (`src/plugin.v1.js`, `src/plugin.v2.js`) wires this to its own logging
+ *   transport.
  */
 export async function loadPluginConfig({ configPath = resolveConfigPath(), log = () => {} } = {}) {
   if (!configPath) {

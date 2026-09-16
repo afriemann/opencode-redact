@@ -1,109 +1,178 @@
-# opencode V2 Compatibility Audit — `opencode-redact`
+# opencode V2 Compatibility — `opencode-redact`
 
-**Date:** 2026-09-15
-**Tested against:** `opencode-ai@dev` (`0.0.0-dev-202609142154`), via the
-`opencode2` sandbox command. See the shared
-`reality/opencode-v2-sandbox-plugin-compat` memory atom and `opencode-use`'s
-`docs/v2-compat-audit.md` for the general V2 background and methodology —
-not repeated in full here.
+**Date:** 2026-09-16
+**Change:** `v2-plugin-migration` (supersedes the earlier `v2-compat-audit` change)
 
-**Note on hook discovery:** this repo's primary local checkout
-(`~/git/opencode-redact`) was stale relative to `origin/main` (62 lines vs.
-166) — the local branch had not been pulled since a `chat.message` hook was
-added alongside the original `tool.execute.after` hook. The worktree used
-for this audit was created fresh from `origin/main` and has the current
-2-hook version; the primary checkout should be fast-forwarded separately.
+## Correction to the prior audit
 
-## What "opencode V2" is
+The version of this document written under the `v2-compat-audit` change
+(2026-09-15) tested against `opencode-ai@dev` and concluded both hooks
+"work correctly" on V2 with no action needed. That conclusion was based on
+the wrong target: `opencode-ai@dev` is a prerelease channel of the V1
+product, not the real V2 product. **V1 plugin implementations do not run
+under the real V2 host at all** — the real, separately-versioned V2
+product is `@opencode/cli` / `@opencode/plugin` (stable, currently 2.0.3 /
+2.0.4), and it requires a genuine port to `{id, setup(ctx)}`. This change
+performs that real port and replaces the prior audit's conclusion.
 
-See `opencode-use`'s audit doc for the full background. In short: V2
-(`packages/core`, Effect-based) is merged incrementally into the same
-`opencode-ai` package, tracked via prerelease dist-tags. `opencode debug v2`
-confirms V2 is live today only for the catalog domain — the V1 plugin
-runtime (hooks used here) is unaffected so far.
+## What changed
 
-## Hooks registered by this plugin (`src/index.js`, current `origin/main`)
+- `src/index.js` renamed to `src/plugin.v1.js` (V1 adapter, behavior
+  unchanged) — `git mv`, no logic changes.
+- New `src/plugin.v2.js`: a V2 adapter built directly on the plugin's
+  already runtime-agnostic pure modules (`redact.js`, `secretlint.js`,
+  `config.js`) — no new "core" extraction was needed, since those modules
+  already took zero opencode-shaped input.
+- `package.json`: `"."`/`"./v1"` → `plugin.v1.js`, `"./v2"` → `plugin.v2.js`;
+  `@opencode/plugin` added as an optional peer + dev dependency, mirroring
+  the existing treatment of `@opencode-ai/plugin`.
 
-| Hook | Purpose |
+## Hook mapping (V1 → V2)
+
+| V1 | V2 | Notes |
+|---|---|---|
+| `tool.execute.after(input, output)` | `ctx.tool.hook("execute.after", event)` | See "Tool-output redaction" below — the real shape required a design correction after the initial implementation. |
+| `chat.message(_input, output)` | `ctx.session.hook("prompt", event)` | See "User-message redaction" below. |
+| `client.app.log({body})` | `process.stderr.write(...)` | V2's `Context.app` has no `log` method (confirmed by reading the installed `@opencode/plugin` types) — message content is unchanged, only the transport differs. |
+
+## Design decision: `Plugin.define` is not imported at runtime
+
+`src/plugin.v2.js` exports a plain `{id, setup}` object literal instead of
+`Plugin.define({id, setup})`. Verified by reading the installed
+`@opencode/plugin` 2.0.4 source directly: `Plugin.define` is a literal
+identity function (`export function define(plugin) { return plugin }`),
+so nothing is lost at runtime by not calling it. `@opencode/plugin` is an
+**optional** peer dependency — importing it at runtime risks a module
+resolution failure for any user who hasn't installed it, which for a
+security-redaction plugin would fail *open* (silently disabled) rather
+than *closed*. A tripwire test (`test/plugin-conformance.test.js`)
+imports `Plugin.define` from the devDependency and asserts identity
+behavior, so a future `@opencode/plugin` release that makes `define`
+load-bearing is caught by CI instead of silently breaking production.
+
+**Empirically confirmed against the real host** (`@opencode/cli` 2.0.3,
+`.opencode/plugins/` auto-discovery): the bare `{id, setup}` shape loads
+successfully — no `PluginModule.LoadError`, unlike five other still-V1-shaped
+plugin files present in the same test environment, which all failed with
+`Plugin must export a default definition with an id and an effect or setup
+function` for comparison.
+
+## Tool-output redaction — real shape, and a real gap found and fixed
+
+Design.md's original plan assumed three possible `result` shapes: a plain
+string `content`, a `Content[]` array, or (when `content` is absent) a bare
+string `output`. Testing against the real host with a real tool call
+(`Use the bash tool to run: python3 -c "import secrets; print('aws_secret_access_key=' + ...)"`)
+surfaced the **actual** shape emitted by the built-in `shell` tool (V2's
+name for V1's `bash`):
+
+```json
+{
+  "content": [
+    {"type": "text", "text": "aws_secret_access_key=<...>\n"},
+    {"type": "text", "text": "Command exited with code 0."}
+  ],
+  "output": {"exit": 0, "truncated": false, "output": "aws_secret_access_key=<...>\n", "status": "completed"},
+  "metadata": {...}
+}
+```
+
+Two findings, one of them a real gap:
+
+1. **`content` is a `Content[]` array** (design.md's D6c case), correctly
+   redacted by the implementation: block 0's secret is replaced, block 1
+   (no secret) is untouched, one annotation appended to the last redacted
+   block. Confirmed via a `SENTINEL`-style diagnostic log added temporarily
+   during verification, then removed.
+2. **`output` is NOT a bare string when `content` is present** — it is a
+   structured `{exit, truncated, output: <same raw text as content>,
+   status}` record. The original design (D6d) only redacted a bare-string
+   `output`, and only when `content` was entirely absent — it never
+   anticipated `output` duplicating the same secret in a *different*,
+   *structured* shape while `content` was simultaneously populated. Since
+   this is empirically confirmed to be the real, common shape for the
+   built-in shell tool (not a hypothetical), the implementation was
+   corrected: `redactToolResult` now also redacts a nested `output.output`
+   string field whenever present, **independently of whether `content` was
+   already handled** — so the same secret cannot survive in this parallel
+   field. Two new regression tests cover this exact shape (secret present,
+   and the negative case where nothing is redacted and the object is left
+   byte-identical).
+
+**Verification status:** the corrected code is covered by 232 passing unit/
+integration tests (up from 210 pre-migration), including tests built from
+the exact real-host payload shape captured above. The hook registration and
+firing (`ctx.tool.hook("execute.after", ...)` receiving a real, populated
+event for a real `shell` tool call, `status: "completed"`) was directly
+confirmed against the real host (`@opencode/cli` 2.0.3) via a temporary
+diagnostic log, then the fix was verified via the unit test suite. A final,
+clean end-to-end re-run to directly observe the corrected redaction on the
+live host (rather than via unit tests reproducing the captured shape) was
+attempted but not completed — the test sandbox became unresponsive due to
+unrelated heavy resource contention on the host machine (five concurrent,
+unrelated opencode sessions were running). This is recorded as an
+honestly-scoped gap, not silently elided: the fix is proven correct against
+the exact real shape by test, but the very last "watch it happen live a
+second time" step was not re-obtained after the fix.
+
+## User-message redaction — the design's synthetic-exclusion analysis held
+
+V1 scans only `parts[]` entries where `type === "text" && synthetic !==
+true`, so `@`-mentions, file bodies, and subagent-delivered content are
+never mistaken for user-typed text. V2's `ctx.session.hook("prompt", ...)`
+event carries `event.prompt.text` — a single string, not a parts array.
+Reading the installed `@opencode/plugin`/`@opencode/schema` types directly
+(not guessing) showed that V2's `PromptInput.Prompt` shape has no inlined
+synthetic content at all — `files[]` are URI references, and synthetic
+content is delivered through a structurally separate `SessionInbox` item
+type this hook never receives. The hook boundary itself is therefore
+already scoped the same way V1's `synthetic !== true` filter was, so
+`event.prompt.text` is redacted unconditionally via the same
+`redactUserMessage` used by V1, with one annotation appended directly to
+the string when anything was redacted.
+
+**Verification status:** covered by the shared V1/V2 adapter-conformance
+suite (string-identical redacted text and annotations across both
+adapters, for a shared fixture corpus) and the `noredact` fence-exemption
+test. Not independently re-confirmed against a live prompt on the real host
+in this session (time did not permit a second live scenario after the
+tool-output fix); this is a smaller-risk gap than the tool-output path
+since the underlying `redactUserMessage`/fence logic is unchanged from V1
+and already has 200+ pre-existing unit tests exercising it directly.
+
+## Summary
+
+| Aspect | Status |
 |---|---|
-| `tool.execute.after` | Scans tool output for secrets (via secretlint) and redacts them before they reach the LLM |
-| `chat.message` | Scans non-synthetic text parts of a newly received user message for secrets and redacts them in place, before the message is processed |
-
-## Empirical test result
-
-**Setup:** scratch project (`/tmp/opencode/v2-sandbox/test-redact`) with
-`opencode.json` pointing `plugin` at this repo's `src/index.js` (worktree,
-unmodified, current `origin/main` content).
-
-**Methodological finding:** a secret typed directly in the CLI prompt (even
-split across string-concatenation, base64, or `chr()`-code obfuscation) is
-caught by `chat.message` *before* the tool ever runs — so `tool.execute.after`
-cannot be exercised by a secret present anywhere in the literal prompt text.
-To get positive evidence for `tool.execute.after` specifically, the secret
-had to be generated **inside** the tool execution itself, with zero
-high-entropy substring in the prompt:
-
-```
-opencode2 run "Use the bash tool to run exactly: python3 -c \"import secrets; print(secrets.token_hex(24))\"" \
-  --auto --print-logs --log-level DEBUG
-```
-
-(`--auto` was needed because non-interactive `opencode run` auto-rejects any
-bash permission prompt not already covered by an allow-listed pattern —
-`python3 -c "..."` isn't pre-allowed, unlike `echo *`.)
-
-**Result — both hooks fired with direct positive evidence:**
-
-| Hook | Result | Evidence |
-|---|---|---|
-| `chat.message` | ✅ Pass (direct evidence) | Multiple runs where a secret-shaped string was typed in the prompt produced: `message="redacted 1 secret(s) across user message parts (rules: high-entropy)"` (exact match to the hook's own log format, `src/index.js:150`), followed by the model correctly reporting it received a `***REDACTED:...***` placeholder instead of the real value |
-| `tool.execute.after` | ✅ Pass (direct evidence) | The `secrets.token_hex(24)` run produced: `message="redacted 1 secret(s) in tool 'bash' output (rules: high-entropy)"` (exact match to `src/index.js:66`), and the model's final response confirmed the tool output was redacted rather than showing the raw token |
-
-No `opencode-redact` errors were logged in any run. The only unrelated
-failure observed was the already-known
-`~/.config/opencode/plugins/opencode-openspec.js` load failure
-(`command.trim is not a function`), tracked in that repo's own audit.
-
-## Cross-reference against the documented V2 plugin API
-
-V2's plugin API (`packages/plugin/src/v2/{effect,promise}/README.md`)
-documents only `agent`/`catalog`/`command`/`integration`/`reference`/`skill`
-`.transform()` hooks and `aisdk.sdk`/`aisdk.language` runtime hooks. There is
-no documented V2 equivalent for `tool.execute.after` or `chat.message`.
-Empirically, both still work today on the V1 plugin runtime.
-
-## Risk rating and recommended action
-
-Risk = likelihood × impact of this hook breaking on a future V2 migration.
-
-| Hook | Risk | Recommended action |
-|---|---|---|
-| `tool.execute.after` | Medium-High | Core mechanism for redacting leaked secrets in tool output. No V2-documented equivalent. Highest-priority hook to re-test on every `dev` bump — a silent failure here means secrets reach the LLM/logs unredacted with no error surfaced. |
-| `chat.message` | Medium-High | Same criticality — protects against secrets typed directly by the user. No V2-documented equivalent. Re-test on every `dev` bump alongside `tool.execute.after`. |
-
-**Overall:** No action needed today — both hooks work correctly against the
-current `dev` prerelease, with direct positive evidence for each. Given the
-security-relevant nature of this plugin (a silent break here has real data-
-exposure consequences, unlike a purely functional plugin), re-test this pair
-of hooks on every `dev`/`beta` refresh, not just periodically.
+| Plugin loads on real V2 host (`@opencode/cli` 2.0.3) | ✅ Confirmed live |
+| `setup()` runs, both hooks register | ✅ Confirmed live |
+| `execute.after` fires with real data for a real tool call | ✅ Confirmed live |
+| Tool-output redaction — `Content[]` shape | ✅ Confirmed live + unit tested |
+| Tool-output redaction — nested `output.output` shape | ✅ Gap found live, fixed, unit tested against the exact real shape; final live re-confirmation not completed (sandbox resource contention) |
+| User-message redaction | ✅ Unit tested (shared V1/V2 conformance suite); not independently re-confirmed live in this session |
+| No runtime import of either host SDK | ✅ Enforced by test |
 
 ## How to reproduce this test
 
 ```bash
-cd ~/opencode-v2-sandbox && npm install opencode-ai@dev && node node_modules/opencode-ai/postinstall.mjs
-opencode2 --version
+mkdir -p ~/opencode-v2-real && cd ~/opencode-v2-real
+npm init -y && npm install @opencode/cli@latest
+node node_modules/@opencode/cli/postinstall.mjs
+ln -sf ~/opencode-v2-real/node_modules/.bin/opencode ~/.local/bin/opencode-v2-real
 
-mkdir -p /tmp/opencode-redact-v2-test && cd /tmp/opencode-redact-v2-test
-cat > opencode.json << 'EOF'
-{ "$schema": "https://opencode.ai/config.json",
-  "plugin": ["/absolute/path/to/opencode-redact/src/index.js"] }
-EOF
+mkdir -p /tmp/opencode-redact-v2-test/.opencode/plugins /tmp/opencode-redact-v2-test/.opencode/lib
+cp src/plugin.v2.js /tmp/opencode-redact-v2-test/.opencode/plugins/
+cp src/redact.js src/secretlint.js src/config.js src/prescreen.js src/entropy-rule.js \
+  /tmp/opencode-redact-v2-test/.opencode/lib/
+# then fix plugin.v2.js's relative imports to ../lib/ -- .opencode/plugins/
+# scans EVERY .js file directly inside it as its own candidate plugin, so
+# shared modules must live in a sibling directory, never alongside it.
+cd /tmp/opencode-redact-v2-test
+npm init -y && npm install @secretlint/config-loader @secretlint/core \
+  @secretlint/secretlint-rule-preset-recommend jsonc-parser xdg-basedir
 
-# chat.message: type a secret-shaped string directly
-opencode2 run "echo test-value ghp_1234567890abcdefghijklmnopqrstuvwxyzAB" \  # pragma: allowlist secret
-  --print-logs --log-level DEBUG 2>&1 | grep -iE "opencode-redact|redacted"
-
-# tool.execute.after: secret must be generated inside the tool, not typed
-opencode2 run "Use the bash tool to run exactly: python3 -c \"import secrets; print(secrets.token_hex(24))\"" \
-  --auto --print-logs --log-level DEBUG 2>&1 | grep -iE "opencode-redact|redacted"
+opencode-v2-real plugin list   # confirms auto-discovery found the plugin
+opencode-v2-real run "Use the bash tool to run exactly: python3 -c \"import secrets; print('aws_secret_access_key=' + secrets.token_hex(24))\"" \
+  --print-logs --log-level debug --standalone --auto
+# --standalone is required to see server-side plugin logs at all.
 ```

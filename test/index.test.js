@@ -1,13 +1,9 @@
 // spec: openspec/specs/tool-output-redaction/spec.md
 // spec: openspec/changes/add-user-message-redaction/specs/user-message-redaction/spec.md
-import { readFileSync, readdirSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { describe, it, expect, vi } from "vitest";
-import OpencodeRedact from "../src/index.js";
+import OpencodeRedact from "../src/plugin.v1.js";
 import { RULE_FIXTURES } from "./fixtures.js";
 import { ENTROPY_FIXTURES, SHORT_PASSWORD_FIXTURES } from "./entropy-fixtures.js";
-
-const SRC_DIR = fileURLToPath(new URL("../src/", import.meta.url));
 
 function fakeClient() {
   return {
@@ -19,19 +15,16 @@ function fakeClient() {
 
 describe("export surface", () => {
   it("has only a default export (no named exports), matching the opencode-use loader constraint", async () => {
-    const mod = await import("../src/index.js");
+    const mod = await import("../src/plugin.v1.js");
     const keys = Object.keys(mod).filter((k) => k !== "default");
     expect(keys).toEqual([]);
   });
 
-  it("never imports @opencode-ai/plugin at runtime (types-only via erased JSDoc, per design.md D7)", () => {
-    for (const file of readdirSync(SRC_DIR)) {
-      if (!file.endsWith(".js")) continue;
-      const source = readFileSync(new URL(file, `file://${SRC_DIR}`), "utf8");
-      const hasRuntimeImport = /^\s*import\s.*@opencode-ai\/plugin/m.test(source);
-      expect(hasRuntimeImport, `${file} must not have a runtime import of @opencode-ai/plugin`).toBe(false);
-    }
-  });
+  // The no-runtime-SDK-import scan for this file (and every src/*.js file)
+  // now lives in test/plugin-conformance.test.js's "export-surface
+  // invariants" suite, which covers @opencode-ai/plugin AND @opencode/plugin
+  // across the same directory -- a strict superset of what used to be
+  // asserted here. Kept in one place to avoid two tests drifting apart.
 });
 
 describe("plugin factory", () => {

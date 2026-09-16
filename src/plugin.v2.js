@@ -1,0 +1,249 @@
+// src/plugin.v2.js — opencode-redact, V2 plugin entrypoint
+//
+// Thin adapter over the runtime-agnostic redaction core (src/redact.js,
+// src/secretlint.js, src/config.js), mapping the same detect/redact/annotate
+// logic onto opencode's real V2 plugin SDK (`@opencode/plugin`,
+// `{id, setup(ctx)}`). See design.md for the full decision record (D1-D9).
+//
+//   V1                                     V2
+//   tool.execute.after(input, output)      ctx.tool.hook("execute.after", event)
+//   chat.message(_input, output)           ctx.session.hook("prompt", event)
+//   client.app.log                         process.stderr (design.md D3)
+//
+// Deliberately does NOT import `@opencode/plugin` at runtime (design.md D1):
+// `Plugin.define` is a verified identity function, and the package is an
+// OPTIONAL peer dependency that end users may not have installed — a
+// runtime import would fail this security plugin CLOSED (load error)
+// instead of open. This file exports a plain object literal with the same
+// shape `Plugin.define({...})` would produce.
+//
+// @typedef {import("@opencode/plugin").Plugin} Plugin
+
+import { createSecretlintConfig, createCompositeLinter } from "./secretlint.js";
+import { loadPluginConfig } from "./config.js";
+import { redactSecrets, redactUserMessage, buildAnnotation, buildUserMessageAnnotation, scanAndRedact } from "./redact.js";
+
+const PLUGIN_NAME = "opencode-redact";
+
+/** Returns a logger function; V2's Context.app has no log method (design.md D3), so this is stderr-only. */
+function makeLogger() {
+  return (level, message) => {
+    process.stderr.write(`[${PLUGIN_NAME}] [${level}] ${message}\n`);
+  };
+}
+
+/**
+ * Redacts a single V2 `Tool.Content` block in place. Returns
+ * `{content, redactionCount, ruleIds}` — `content` unchanged when nothing
+ * was redacted or the block is not a `type:"text"` block (design.md D6c:
+ * `type:"file"` blocks are URI references with no inline body, and are
+ * left completely untouched).
+ */
+async function redactContentBlock(block, { lint }) {
+  if (!block || block.type !== "text" || typeof block.text !== "string") {
+    return { block, redactionCount: 0, ruleIds: [] };
+  }
+  const scanned = await scanAndRedact(block.text, { lint });
+  if (scanned.redactionCount === 0) {
+    return { block, redactionCount: 0, ruleIds: [] };
+  }
+  return {
+    block: { ...block, text: scanned.text },
+    redactionCount: scanned.redactionCount,
+    ruleIds: scanned.ruleIds,
+  };
+}
+
+/**
+ * Redacts a V2 tool result (design.md D6): only `status === "completed"` is
+ * ever scanned (D6a — a tool error's `error: Tool.Error` is left alone,
+ * both because V1 never saw this branch either and because handling it
+ * would require a runtime import of that schema class, reintroducing the
+ * dependency D1 removes). Returns a NEW result object when anything was
+ * redacted (`Tool.Result`'s fields are readonly), or the original `result`
+ * reference unchanged otherwise.
+ */
+async function redactToolResult(result, { lint }) {
+  let workingResult = result;
+  let totalRedactionCount = 0;
+  const ruleIdSet = new Set();
+
+  if (typeof workingResult.content === "string") {
+    const scanned = await redactSecrets(workingResult.content, { lint });
+    if (scanned.redactionCount > 0) {
+      workingResult = { ...workingResult, content: scanned.text };
+      totalRedactionCount += scanned.redactionCount;
+      for (const ruleId of scanned.ruleIds) ruleIdSet.add(ruleId);
+    }
+  } else if (Array.isArray(workingResult.content)) {
+    const blocks = [];
+    let blockTotal = 0;
+    const blockRuleIds = new Set();
+    let lastRedactedIndex = -1;
+
+    for (const block of workingResult.content) {
+      const redacted = await redactContentBlock(block, { lint });
+      blocks.push(redacted.block);
+      if (redacted.redactionCount > 0) {
+        blockTotal += redacted.redactionCount;
+        for (const ruleId of redacted.ruleIds) blockRuleIds.add(ruleId);
+        lastRedactedIndex = blocks.length - 1;
+      }
+    }
+
+    if (blockTotal > 0) {
+      // Design.md D6c: exactly one annotation, on the last redacted block.
+      const sortedRuleIds = [...blockRuleIds].sort();
+      blocks[lastRedactedIndex] = {
+        ...blocks[lastRedactedIndex],
+        text: `${blocks[lastRedactedIndex].text}\n\n${buildAnnotation(blockTotal, sortedRuleIds)}`,
+      };
+      workingResult = { ...workingResult, content: blocks };
+      totalRedactionCount += blockTotal;
+      for (const ruleId of blockRuleIds) ruleIdSet.add(ruleId);
+    }
+  } else if (typeof workingResult.content === "undefined" && typeof workingResult.output === "string") {
+    // design.md D6d: `content` absent entirely and `output` is a bare
+    // string -- the only shape the original design anticipated.
+    const scanned = await redactSecrets(workingResult.output, { lint });
+    if (scanned.redactionCount > 0) {
+      workingResult = { ...workingResult, output: scanned.text };
+      totalRedactionCount += scanned.redactionCount;
+      for (const ruleId of scanned.ruleIds) ruleIdSet.add(ruleId);
+    }
+  }
+
+  // Empirically confirmed against the real host (@opencode/cli 2.0.4): the
+  // built-in `shell` tool's `result.output` is NOT a bare string even when
+  // `result.content` IS present -- it is a structured
+  // `{exit, truncated, output: <same raw text as content>, status}` record.
+  // This is a duplicate carrier of the same text `content` already covers,
+  // not the "arbitrary programmatic data, never model-facing" case D6d's
+  // original bare-string branch above was written for. Redact this nested
+  // string field independently of whether `content` was already handled,
+  // so the same secret can never survive in this parallel field.
+  if (
+    workingResult.output &&
+    typeof workingResult.output === "object" &&
+    !Array.isArray(workingResult.output) &&
+    typeof workingResult.output.output === "string"
+  ) {
+    const scanned = await scanAndRedact(workingResult.output.output, { lint });
+    if (scanned.redactionCount > 0) {
+      workingResult = { ...workingResult, output: { ...workingResult.output, output: scanned.text } };
+      totalRedactionCount += scanned.redactionCount;
+      for (const ruleId of scanned.ruleIds) ruleIdSet.add(ruleId);
+    }
+  }
+
+  if (totalRedactionCount === 0) {
+    return { result, redactionCount: 0, ruleIds: [] };
+  }
+  return { result: workingResult, redactionCount: totalRedactionCount, ruleIds: [...ruleIdSet].sort() };
+}
+
+export default {
+  id: PLUGIN_NAME,
+
+  /**
+   * `testOverrides` (design.md D2) is a second parameter, never a named
+   * export — the real V2 host only ever calls `setup(ctx)`, so the default
+   * `{}` is always what production sees; the shape stays exactly
+   * `{id, setup}`. Mirrors V1's `_loadPluginConfigOverride` /
+   * `_createSecretlintConfigOverride` / `_createLinterOverride` seam.
+   *
+   * @param {{
+   *   _createSecretlintConfigOverride?: () => Promise<unknown>,
+   *   _createLinterOverride?: (config: unknown, options?: unknown) => (text: string, opts?: unknown) => Promise<unknown>,
+   *   _loadPluginConfigOverride?: (params?: unknown) => Promise<{ disableHighEntropy: boolean }>,
+   * }} [testOverrides]
+   */
+  async setup(ctx, testOverrides = {}) {
+    const loadPlugConfig = testOverrides._loadPluginConfigOverride ?? loadPluginConfig;
+    const loadConfig = testOverrides._createSecretlintConfigOverride ?? createSecretlintConfig;
+    const buildLinter = testOverrides._createLinterOverride ?? createCompositeLinter;
+
+    const log = makeLogger();
+
+    // Step 1 (design.md D2): the plugin's own optional settings file. Never
+    // throws, by loadPluginConfig's own contract — no try/catch needed, and
+    // this step MUST NOT share a try block with step 2, so a config-file
+    // problem can never be reported inside, or mistaken for, the fail-loud
+    // secretlint-config failure.
+    const pluginConfig = await loadPlugConfig({
+      log: (level, message) => log(level, message),
+    });
+
+    // Step 2: the secretlint rule bundle itself. May throw — fail loud,
+    // unchanged from V1's behavior.
+
+    let config;
+    try {
+      config = await loadConfig();
+    } catch (err) {
+      log("error", `failed to load secretlint rule configuration: ${err?.message ?? err}`);
+      throw err;
+    }
+
+    const lint = buildLinter(config, { disableHighEntropy: pluginConfig.disableHighEntropy });
+
+    const registrations = await Promise.all([
+      ctx.tool.hook("execute.after", async (event) => {
+        try {
+          if (event.status !== "completed") {
+            // design.md D6a: a tool error is never scanned here.
+            return;
+          }
+
+          const { result, redactionCount, ruleIds } = await redactToolResult(event.result, { lint });
+          if (redactionCount === 0) {
+            return;
+          }
+
+          event.result = result;
+          log("warn", `redacted ${redactionCount} secret(s) in tool '${event.tool}' output (rules: ${ruleIds.join("+")})`);
+        } catch (err) {
+          log("error", `redaction handler failed for tool '${event?.tool}': ${err?.message}`);
+        }
+      }),
+
+      ctx.session.hook("prompt", async (event) => {
+        try {
+          const text = event?.prompt?.text;
+          if (typeof text !== "string" || text.length === 0) {
+            return;
+          }
+
+          // design.md D4: the V2 prompt hook boundary already excludes
+          // synthetic/file-body content structurally (they are delivered
+          // through a separate SessionInbox item shape this hook never
+          // receives) — so the whole string is scanned unconditionally,
+          // matching V1's effective (non-synthetic-parts-only) scope.
+          const { text: redacted, redactionCount, ruleIds } = await redactUserMessage(text, { lint });
+          if (redactionCount === 0) {
+            return;
+          }
+
+          // Write the redaction first, the annotation second, as two
+          // separate steps (design.md D5) — matching V1's tested guarantee
+          // that a redaction survives even if the annotation-append itself
+          // throws. A single combined assignment would lose an
+          // already-computed redaction if that one write ever failed.
+          event.prompt.text = redacted;
+          try {
+            event.prompt.text += `\n\n${buildUserMessageAnnotation(redactionCount, ruleIds)}`;
+          } catch (err) {
+            log("error", `failed to append user-message redaction annotation: ${err?.message ?? err}`);
+          }
+          log("warn", `redacted ${redactionCount} secret(s) in user message (rules: ${ruleIds.join("+")})`);
+        } catch (err) {
+          log("error", `user-message redaction handler failed: ${err?.message ?? err}`);
+        }
+      }),
+    ]);
+
+    return async () => {
+      await Promise.allSettled(registrations.map((registration) => registration.dispose()));
+    };
+  },
+};

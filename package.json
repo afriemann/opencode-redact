@@ -3,7 +3,12 @@
   "version": "0.1.0",
   "description": "opencode plugin that redacts secrets from tool output before it reaches the LLM.",
   "type": "module",
-  "main": "src/index.js",
+  "main": "src/plugin.v1.js",
+  "exports": {
+    ".": "./src/plugin.v1.js",
+    "./v1": "./src/plugin.v1.js",
+    "./v2": "./src/plugin.v2.js"
+  },
   "engines": {
     "node": ">=22.5"
   },
@@ -11,7 +16,12 @@
     "test": "vitest run"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.15.0"
+    "@opencode-ai/plugin": ">=1.15.0",
+    "@opencode/plugin": "^2.0.4"
+  },
+  "peerDependenciesMeta": {
+    "@opencode-ai/plugin": { "optional": true },
+    "@opencode/plugin": { "optional": true }
   },
   "dependencies": {
     "@secretlint/config-loader": "^13.0.5",
@@ -21,6 +31,7 @@
     "xdg-basedir": "^5.1.0"
   },
   "devDependencies": {
+    "@opencode/plugin": "^2.0.4",
     "vitest": "^5.0.0"
   }
 }
