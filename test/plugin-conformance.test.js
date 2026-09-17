@@ -27,8 +27,14 @@ function fakeV1Client() {
  * shape (design.md "Verified platform facts").
  */
 function fakeV2Ctx() {
-  const hooks = { "execute.after": null, prompt: null };
-  const disposals = { "execute.after": vi.fn().mockResolvedValue(undefined), prompt: vi.fn().mockResolvedValue(undefined) };
+  const hooks = { "execute.after": null, prompt: null, context: null, generate: null, compaction: null };
+  const disposals = {
+    "execute.after": vi.fn().mockResolvedValue(undefined),
+    prompt: vi.fn().mockResolvedValue(undefined),
+    context: vi.fn().mockResolvedValue(undefined),
+    generate: vi.fn().mockResolvedValue(undefined),
+    compaction: vi.fn().mockResolvedValue(undefined),
+  };
   const ctx = {
     tool: {
       hook: vi.fn(async (name, cb) => {
@@ -286,7 +292,7 @@ describe("V2-only shape-specific cases", () => {
     expect(JSON.stringify(event.result.output)).toBe(before);
   });
 
-  it("execute.after: event.result is replaced wholesale (readonly fields), preserving metadata", async () => {
+  it("execute.after: event.result is replaced wholesale (readonly fields)", async () => {
     const { hooks } = await loadV2();
     const secret = RULE_FIXTURES[0].content;
     const originalResult = Object.freeze({ content: `leak=${secret}`, metadata: { durationMs: 42 } });
@@ -296,19 +302,152 @@ describe("V2-only shape-specific cases", () => {
     expect(event.result.metadata).toEqual({ durationMs: 42 });
     expect(event.result.content).toContain("***REDACTED:");
   });
+
+  it("execute.after: a secret in the tool result's metadata is redacted", async () => {
+    const { hooks } = await loadV2();
+    const secret = RULE_FIXTURES[0].content;
+    const originalResult = Object.freeze({
+      content: "clean text",
+      metadata: { durationMs: 42, note: `leak=${secret}` },
+    });
+    const event = { tool: "bash", status: "completed", result: originalResult };
+    await hooks["execute.after"](event);
+    expect(event.result.metadata.note).toContain("***REDACTED:");
+    expect(event.result.metadata.note).not.toContain(secret);
+    expect(event.result.metadata.durationMs).toBe(42);
+    expect(event.result.content).toBe("clean text");
+  });
+
+  it("execute.after: an unusually large structured result does not block indefinitely", async () => {
+    const { hooks } = await loadV2();
+    const secret = RULE_FIXTURES[0].content;
+    const bigClean = "x".repeat(250_000);
+    const originalResult = Object.freeze({
+      content: "clean text",
+      metadata: { blob: bigClean, note: `leak=${secret}` },
+    });
+    const event = { tool: "bash", status: "completed", result: originalResult };
+    const start = Date.now();
+    await hooks["execute.after"](event);
+    expect(Date.now() - start).toBeLessThan(5000);
+    // The budget may leave the tail unscanned; the result must not hang or throw.
+    expect(typeof event.result.metadata.blob).toBe("string");
+  });
+});
+
+describe("V2-only shape-specific cases — session context/generate/compaction hooks", () => {
+  const HOOK_NAMES = ["context", "generate", "compaction"];
+
+  it("setup registers context, generate, and compaction session hooks", async () => {
+    const { ctx } = await loadV2();
+    for (const name of HOOK_NAMES) {
+      expect(ctx.session.hook).toHaveBeenCalledWith(name, expect.any(Function));
+    }
+  });
+
+  for (const name of HOOK_NAMES) {
+    it(`${name}: redacts a known-detectable secret in a system prompt segment`, async () => {
+      const { hooks } = await loadV2();
+      const secret = RULE_FIXTURES[0].content;
+      const event = {
+        sessionID: "s1",
+        system: [{ type: "text", text: `leak=${secret}` }],
+        messages: [],
+      };
+      await hooks[name](event);
+      expect(event.system[0].text).toContain("***REDACTED:");
+      expect(event.system[0].text).not.toContain(secret);
+      const annotationCount = (event.system[0].text.match(/\[opencode-redact\]/g) ?? []).length;
+      expect(annotationCount).toBe(1);
+    });
+
+    it(`${name}: leaves a clean system prompt segment unchanged`, async () => {
+      const { hooks } = await loadV2();
+      const event = {
+        sessionID: "s1",
+        system: [{ type: "text", text: CLEAN_TEXT }],
+        messages: [],
+      };
+      await hooks[name](event);
+      expect(event.system[0].text).toBe(CLEAN_TEXT);
+    });
+
+    it(`${name}: redacts a secret in a message's text content`, async () => {
+      const { hooks } = await loadV2();
+      const secret = RULE_FIXTURES[0].content;
+      const event = {
+        sessionID: "s1",
+        system: [],
+        messages: [{ role: "user", content: [{ type: "text", text: `leak=${secret}` }] }],
+      };
+      await hooks[name](event);
+      expect(event.messages[0].content[0].text).toContain("***REDACTED:");
+      expect(event.messages[0].content[0].text).not.toContain(secret);
+    });
+
+    it(`${name}: non-text message content is left untouched`, async () => {
+      const { hooks } = await loadV2();
+      const secret = RULE_FIXTURES[0].content;
+      const toolCallBlock = { type: "tool-call", id: "1", name: "bash", input: { cmd: `leak=${secret}` } };
+      const event = {
+        sessionID: "s1",
+        system: [],
+        messages: [{ role: "assistant", content: [toolCallBlock] }],
+      };
+      await hooks[name](event);
+      expect(event.messages[0].content[0]).toBe(toolCallBlock);
+    });
+
+    it(`${name}: one annotation for multiple redactions in the system prompt`, async () => {
+      const { hooks } = await loadV2();
+      const secretA = RULE_FIXTURES.find((f) => f.rule === "aws").content;
+      const secretB = RULE_FIXTURES.find((f) => f.rule === "privatekey").content;
+      const event = {
+        sessionID: "s1",
+        system: [
+          { type: "text", text: `first=${secretA}` },
+          { type: "text", text: `second=${secretB}` },
+        ],
+        messages: [],
+      };
+      await hooks[name](event);
+      expect(event.system[0].text).not.toContain("[opencode-redact]");
+      expect(event.system[1].text).toContain("[opencode-redact]");
+      const totalAnnotations =
+        (event.system[0].text.match(/\[opencode-redact\]/g) ?? []).length +
+        (event.system[1].text.match(/\[opencode-redact\]/g) ?? []).length;
+      expect(totalAnnotations).toBe(1);
+    });
+
+    it(`${name}: no annotation when no redaction occurred`, async () => {
+      const { hooks } = await loadV2();
+      const event = {
+        sessionID: "s1",
+        system: [{ type: "text", text: CLEAN_TEXT }],
+        messages: [{ role: "user", content: [{ type: "text", text: CLEAN_TEXT }] }],
+      };
+      await hooks[name](event);
+      expect(event.system[0].text).toBe(CLEAN_TEXT);
+      expect(event.messages[0].content[0].text).toBe(CLEAN_TEXT);
+    });
+  }
 });
 
 describe("lifecycle", () => {
-  it("setup awaits both hook registrations and returns a cleanup that disposes both", async () => {
+  it("setup awaits all hook registrations and returns a cleanup that disposes all of them", async () => {
     const { ctx, disposals, cleanup } = await loadV2();
     expect(ctx.tool.hook).toHaveBeenCalledWith("execute.after", expect.any(Function));
     expect(ctx.session.hook).toHaveBeenCalledWith("prompt", expect.any(Function));
+    expect(ctx.session.hook).toHaveBeenCalledWith("context", expect.any(Function));
+    expect(ctx.session.hook).toHaveBeenCalledWith("generate", expect.any(Function));
+    expect(ctx.session.hook).toHaveBeenCalledWith("compaction", expect.any(Function));
     await cleanup();
-    expect(disposals["execute.after"]).toHaveBeenCalled();
-    expect(disposals.prompt).toHaveBeenCalled();
+    for (const key of ["execute.after", "prompt", "context", "generate", "compaction"]) {
+      expect(disposals[key]).toHaveBeenCalled();
+    }
   });
 
-  it("a throwing dispose does not prevent the other registration's disposal", async () => {
+  it("a throwing dispose does not prevent the other registrations' disposal", async () => {
     const { ctx } = fakeV2Ctx();
     const disposeToolFail = vi.fn().mockRejectedValue(new Error("dispose boom"));
     const disposeSession = vi.fn().mockResolvedValue(undefined);

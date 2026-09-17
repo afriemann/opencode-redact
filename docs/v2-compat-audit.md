@@ -176,3 +176,45 @@ opencode-v2-real run "Use the bash tool to run exactly: python3 -c \"import secr
   --print-logs --log-level debug --standalone --auto
 # --standalone is required to see server-side plugin logs at all.
 ```
+
+## Follow-up: session-context hook coverage and metadata redaction (2026-09-17)
+
+A later architectural review of this port found two remaining coverage
+gaps, addressed in the `fix-v2-session-hook-coverage` change:
+
+1. **Missing hook registrations.** V2 exposes `context`, `generate`, and
+   `compaction` session hooks — `ctx.session.hook(name, callback)` — that
+   assemble or re-derive the exact `{system: SystemPart[], messages:
+   Message[]}` payload sent to a model provider. None of them was
+   registered, so a secret embedded in assembled system content (skills,
+   `AGENTS.md`, reference docs, MCP tool descriptions) reached every
+   provider call unredacted, and the `generate` hook's one-shot generation
+   requests (issuable by any other installed plugin) bypassed this plugin
+   entirely. Fixed by registering all three under a shared handler,
+   `redactSessionContextHandler`, reusing the existing `redactContentBlock`
+   block-shape check for both `event.system[]` (every element already has
+   the exact `{type:"text", text}` shape) and each message's
+   `content[]` array (scoped to `type === "text"` blocks only — the other
+   five `ContentPart` variants are left untouched, mirroring the existing
+   `Tool.Content[]` walk's own narrow scope).
+2. **`Tool.Result.metadata` was never scanned.** `redactToolResult` patched
+   `content`/`output` fields as they were empirically discovered, but never
+   touched `metadata`. Fixed with a schema-agnostic recursive string walk
+   (`redactObjectStrings`) applied to `metadata` specifically, bounded by a
+   200,000-character total scan budget so a pathological metadata blob
+   cannot make the walk itself unbounded. `content` and `output` keep
+   their existing, narrowly-scoped, already-tested handling unchanged — a
+   blanket walk over `output` would have started mutating opaque
+   programmatic/codemode data that must stay untouched per the original
+   design's D6d, so the recursive walk was deliberately scoped to
+   `metadata` only.
+
+**Explicitly rejected:** registering `ctx.session.hook("http.request"/
+"http.response", ...)`. The wire body for a provider call is serialized
+from the same `Message`/`Tool.Result` objects already redacted upstream by
+the hooks above — duplication with real added fragility (per-provider body
+parsing, stream clone/replace, WebSocket frame rewriting) and no net
+coverage gain.
+
+See `openspec/changes/archive/*-fix-v2-session-hook-coverage/` (once
+archived) for the full design record and delta specs.

@@ -25,6 +25,14 @@ import { redactSecrets, redactUserMessage, buildAnnotation, buildUserMessageAnno
 
 const PLUGIN_NAME = "opencode-redact";
 
+// D4 (design.md): total character budget for the recursive metadata walk,
+// shared across every string leaf scanned in one redactToolResult call.
+// Consistent with secretlint.js's per-scan DEFAULT_TIMEOUT_MS -- this is a
+// count/size cap, not a new timeout: each scanAndRedact call still races its
+// own per-call timeout unchanged; this only bounds how many such calls one
+// metadata walk can issue.
+const METADATA_SCAN_BUDGET_CHARS = 200_000;
+
 /** Returns a logger function; V2's Context.app has no log method (design.md D3), so this is stderr-only. */
 function makeLogger() {
   return (level, message) => {
@@ -52,6 +60,72 @@ async function redactContentBlock(block, { lint }) {
     redactionCount: scanned.redactionCount,
     ruleIds: scanned.ruleIds,
   };
+}
+
+/**
+ * Recursively walks an arbitrary JSON-like value, scanning and redacting
+ * every string leaf via `scanAndRedact` (design.md D4). Rebuilds arrays and
+ * plain objects only when a descendant actually changed; returns the
+ * original reference unchanged otherwise. Non-string, non-array,
+ * non-object values (numbers, booleans, null, undefined) pass through
+ * as-is.
+ *
+ * `budget.remaining` is a shared, mutable character counter: before
+ * scanning a string leaf, its length is checked against the remaining
+ * budget. A leaf that would exceed the remaining budget is left
+ * unscanned entirely (not truncated) -- fail-open, matching this
+ * plugin's existing scanner-error/timeout behavior -- and the walk
+ * continues over the rest of the tree with whatever budget remains.
+ *
+ * Scoped to `Tool.Result.metadata` only (design.md D4's implementation-time
+ * correction) -- `content` and `output` keep their existing, narrowly
+ * targeted handling in `redactToolResult`.
+ */
+async function redactObjectStrings(value, { lint }, budget) {
+  if (typeof value === "string") {
+    if (value.length === 0 || value.length > budget.remaining) {
+      return { value, redactionCount: 0, ruleIds: [] };
+    }
+    budget.remaining -= value.length;
+    const scanned = await scanAndRedact(value, { lint });
+    return { value: scanned.text, redactionCount: scanned.redactionCount, ruleIds: scanned.ruleIds };
+  }
+
+  if (Array.isArray(value)) {
+    let changed = false;
+    let totalCount = 0;
+    const ruleIdSet = new Set();
+    const items = [];
+    for (const item of value) {
+      const walked = await redactObjectStrings(item, { lint }, budget);
+      items.push(walked.value);
+      if (walked.redactionCount > 0) {
+        changed = true;
+        totalCount += walked.redactionCount;
+        for (const ruleId of walked.ruleIds) ruleIdSet.add(ruleId);
+      }
+    }
+    return { value: changed ? items : value, redactionCount: totalCount, ruleIds: [...ruleIdSet] };
+  }
+
+  if (value && typeof value === "object") {
+    let changed = false;
+    let totalCount = 0;
+    const ruleIdSet = new Set();
+    const walkedObject = {};
+    for (const key of Object.keys(value)) {
+      const walked = await redactObjectStrings(value[key], { lint }, budget);
+      walkedObject[key] = walked.value;
+      if (walked.redactionCount > 0) {
+        changed = true;
+        totalCount += walked.redactionCount;
+        for (const ruleId of walked.ruleIds) ruleIdSet.add(ruleId);
+      }
+    }
+    return { value: changed ? walkedObject : value, redactionCount: totalCount, ruleIds: [...ruleIdSet] };
+  }
+
+  return { value, redactionCount: 0, ruleIds: [] };
 }
 
 /**
@@ -136,10 +210,105 @@ async function redactToolResult(result, { lint }) {
     }
   }
 
+  // design.md D4: metadata is scanned unconditionally, independent of
+  // content/output handling above -- it had zero prior scanning behavior,
+  // so there is no existing test to regress here (unlike output, whose
+  // arbitrary-structured-data case must stay untouched -- see D4's
+  // implementation-time correction).
+  if (workingResult.metadata && typeof workingResult.metadata === "object" && !Array.isArray(workingResult.metadata)) {
+    const budget = { remaining: METADATA_SCAN_BUDGET_CHARS };
+    const walked = await redactObjectStrings(workingResult.metadata, { lint }, budget);
+    if (walked.redactionCount > 0) {
+      workingResult = { ...workingResult, metadata: walked.value };
+      totalRedactionCount += walked.redactionCount;
+      for (const ruleId of walked.ruleIds) ruleIdSet.add(ruleId);
+    }
+  }
+
   if (totalRedactionCount === 0) {
     return { result, redactionCount: 0, ruleIds: [] };
   }
   return { result: workingResult, redactionCount: totalRedactionCount, ruleIds: [...ruleIdSet].sort() };
+}
+
+/**
+ * Walks an array of `{type:"text", text}`-shaped blocks, redacting each via
+ * `redactContentBlock` and mutating the array in place. When anything was
+ * redacted, exactly one `buildAnnotation` note is appended to the last
+ * redacted block's `.text` (the aggregate-then-annotate-once shape shared
+ * by `Tool.Content[]`, `event.system[]`, and each message's `content[]`).
+ * Returns `{redactionCount, ruleIds}` for the caller's own logging.
+ */
+async function redactTextBlockArray(blocks, { lint }) {
+  let total = 0;
+  const ruleIdSet = new Set();
+  let lastRedactedIndex = -1;
+
+  for (let i = 0; i < blocks.length; i += 1) {
+    const redacted = await redactContentBlock(blocks[i], { lint });
+    if (redacted.redactionCount > 0) {
+      blocks[i] = redacted.block;
+      total += redacted.redactionCount;
+      for (const ruleId of redacted.ruleIds) ruleIdSet.add(ruleId);
+      lastRedactedIndex = i;
+    }
+  }
+
+  if (total === 0) {
+    return { redactionCount: 0, ruleIds: [] };
+  }
+
+  const sortedRuleIds = [...ruleIdSet].sort();
+  blocks[lastRedactedIndex] = {
+    ...blocks[lastRedactedIndex],
+    text: `${blocks[lastRedactedIndex].text}\n\n${buildAnnotation(total, sortedRuleIds)}`,
+  };
+  return { redactionCount: total, ruleIds: sortedRuleIds };
+}
+
+/**
+ * Redacts the request payload assembled/re-derived for a provider call
+ * (design.md D1-D3): shared by the `context`, `generate`, and `compaction`
+ * session hooks, since all three extend `SessionContext`
+ * (`{system: SystemPart[], messages: Message[], ...}`, both mutable).
+ *
+ * `event.system[]` elements always have the exact `{type:"text", text}`
+ * shape `redactContentBlock` expects (verified: `SystemPart` is not a
+ * union), so it is reused unchanged. `event.messages[].content[]` is a
+ * six-member tagged union (`Message.content: ContentPart[]`); only
+ * `type === "text"` blocks share that same shape and are redacted --
+ * every other variant (media, tool-call, tool-result, reasoning,
+ * compaction, effort) is left untouched (D3, mirrors the archived design's
+ * D6c precedent of scanning only a verified-safe union member).
+ *
+ * Annotation is aggregated once per container (D2: the whole `system[]`
+ * array; D3: each message's own `content[]` independently) via
+ * `redactTextBlockArray` -- the same aggregate-then-annotate-once shape
+ * the archived design already applies to `Tool.Content[]`.
+ */
+async function redactSessionContextHandler(event, { lint }, log) {
+  try {
+    if (Array.isArray(event.system) && event.system.length > 0) {
+      const { redactionCount, ruleIds } = await redactTextBlockArray(event.system, { lint });
+      if (redactionCount > 0) {
+        log("warn", `redacted ${redactionCount} secret(s) in assembled system prompt (rules: ${ruleIds.join("+")})`);
+      }
+    }
+
+    if (Array.isArray(event.messages)) {
+      for (const message of event.messages) {
+        if (!Array.isArray(message?.content) || message.content.length === 0) {
+          continue;
+        }
+        const { redactionCount, ruleIds } = await redactTextBlockArray(message.content, { lint });
+        if (redactionCount > 0) {
+          log("warn", `redacted ${redactionCount} secret(s) in a message's content (rules: ${ruleIds.join("+")})`);
+        }
+      }
+    }
+  } catch (err) {
+    log("error", `session-context redaction handler failed: ${err?.message ?? err}`);
+  }
 }
 
 export default {
@@ -240,6 +409,10 @@ export default {
           log("error", `user-message redaction handler failed: ${err?.message ?? err}`);
         }
       }),
+
+      ctx.session.hook("context", (event) => redactSessionContextHandler(event, { lint }, log)),
+      ctx.session.hook("generate", (event) => redactSessionContextHandler(event, { lint }, log)),
+      ctx.session.hook("compaction", (event) => redactSessionContextHandler(event, { lint }, log)),
     ]);
 
     return async () => {
