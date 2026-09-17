@@ -190,23 +190,35 @@ specifically targets this case:
 
 ## Install
 
+Both opencode V1 (`@opencode-ai/plugin`) and V2 (`@opencode/cli` /
+`@opencode/plugin`) are supported, via separate entrypoint files.
+
 ```bash
 npm install
 ```
 
-Then symlink the entry file into opencode's plugin directory:
+**V1:** symlink the V1 entry file into opencode's plugin directory:
 
 ```bash
-ln -s "$(pwd)/src/index.js" ~/.config/opencode/plugins/opencode-redact.js
+ln -s "$(pwd)/src/plugin.v1.js" ~/.config/opencode/plugins/opencode-redact.js
 ```
+
+**V2:** add this package (or a local path) to `opencode.json(c)`'s `plugins`
+array, or drop `src/plugin.v2.js` directly into a project's or the global
+`.opencode/plugins/` directory. Note: `.opencode/plugins/` scans every `.js`
+file placed directly inside it as its own candidate plugin — this plugin's
+other source files (`redact.js`, `secretlint.js`, `config.js`, etc.) must
+never be copied alongside `plugin.v2.js` there; they are resolved via normal
+`node_modules` package resolution when installed as a real dependency.
 
 Restart opencode. No further configuration is needed — there is no config
 file in v1 (see "Known limitations").
 
 Unlike some other plugins with a peer dependency on `@opencode-ai/plugin`,
 this plugin needs no additional symlink step for its own dependencies — a
-plain `npm install` inside this repo is sufficient. `@opencode-ai/plugin` is
-referenced only through erased JSDoc types, never imported at runtime.
+plain `npm install` inside this repo is sufficient. Neither `@opencode-ai/plugin`
+nor `@opencode/plugin` is ever imported at runtime by either entrypoint —
+see `docs/v2-compat-audit.md` for why.
 
 ## Configuration
 
