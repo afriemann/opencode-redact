@@ -11,6 +11,16 @@
 // disjoint by construction.
 const CANDIDATE_RUN_PATTERN = /[A-Za-z0-9+/=_-]+/g;
 
+// See openspec/changes/fix-url-entropy-false-positive: `/` is a legitimate
+// standard-base64 alphabet character AND the URL path separator, so a
+// multi-segment URL path is otherwise glued into one candidate run and
+// trivially exceeds the base64 threshold on diversity alone, with no
+// secret present. `findUrlSpans` detects `scheme://…` spans (any RFC
+// 3986-shaped scheme, not just http/https) so `findCandidateRuns` can
+// treat a run's `/` as a hard boundary when — and only when — that run
+// falls within a detected URL span.
+const URL_SPAN_PATTERN = /\b[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s"'<>()]+/g;
+
 const HEX_CLASS_PATTERN = /^[0-9a-fA-F]+$/;
 const BASE64_CLASS_PATTERN = /^[A-Za-z0-9+/=_-]+$/;
 
@@ -48,13 +58,57 @@ export function shannonEntropy(text) {
 }
 
 /**
+ * Returns true when `run` (an object with `start`/`end`) falls entirely
+ * within at least one of `spans`.
+ */
+function isWithinAnySpan(run, spans) {
+  return spans.some((span) => run.start >= span.start && run.end <= span.end);
+}
+
+/**
+ * Finds every URL-shaped span in `text`: an RFC 3986-shaped scheme
+ * (letter, then letters/digits/`+`/`.`/`-`) followed by `://` and every
+ * non-whitespace, non-quote, non-bracket character after it. Used only to
+ * decide where a candidate run's `/` is a path separator rather than a
+ * base64 continuation character — see `findCandidateRuns`.
+ */
+export function findUrlSpans(text) {
+  const spans = [];
+  for (const match of text.matchAll(URL_SPAN_PATTERN)) {
+    spans.push({ start: match.index, end: match.index + match[0].length });
+  }
+  return spans;
+}
+
+/**
  * Returns every maximal run of the candidate charset in `text`, in source
  * order, as `{ start, end, text }`. Disjoint by construction.
+ *
+ * A run that overlaps a detected URL span (`findUrlSpans`) and contains
+ * `/` is split back into its `/`-delimited segments here, each reported
+ * as its own run — a URL path's `/` is a structural separator, not part
+ * of a base64 blob, even though `/` is itself a valid base64 character. A
+ * run outside any URL span, or one inside a URL span with no `/`, is
+ * unaffected.
  */
 export function findCandidateRuns(text) {
+  const urlSpans = findUrlSpans(text);
   const runs = [];
   for (const match of text.matchAll(CANDIDATE_RUN_PATTERN)) {
-    runs.push({ start: match.index, end: match.index + match[0].length, text: match[0] });
+    const start = match.index;
+    const runText = match[0];
+    const end = start + runText.length;
+    if (runText.includes("/") && isWithinAnySpan({ start, end }, urlSpans)) {
+      let segmentStart = start;
+      for (const segment of runText.split("/")) {
+        if (segment.length > 0) {
+          runs.push({ start: segmentStart, end: segmentStart + segment.length, text: segment });
+        }
+        segmentStart += segment.length + 1; // +1 for the consumed "/" delimiter
+      }
+      continue;
+    }
+    runs.push({ start, end, text: runText });
   }
   return runs;
 }
@@ -128,10 +182,6 @@ export function findJwtSpans(text) {
     spans.push({ start: fullStart, end: fullEnd, signatureRange });
   }
   return spans;
-}
-
-function isWithinAnySpan(run, spans) {
-  return spans.some((span) => run.start >= span.start && run.end <= span.end);
 }
 
 // --- Short password-shaped detection path (independent of the base64/hex

@@ -13,6 +13,7 @@ import {
   classifyRun,
   isAllowlistedRun,
   findJwtSpans,
+  findUrlSpans,
   findHighEntropyFindings,
   findPasswordCandidateRuns,
   hasLetterCaseMix,
@@ -466,5 +467,96 @@ describe("SHORT_PASSWORD_FIXTURES (design.md verified fixtures)", () => {
         fixture.expectFinding,
       );
     }
+  });
+});
+
+// spec: openspec/changes/fix-url-entropy-false-positive/specs/high-entropy-secret-detection/spec.md
+//
+// The '/' character is a legitimate standard-base64 alphabet character AND
+// the URL path separator. Without URL-span awareness, an ordinary
+// multi-segment URL path gets glued into one candidate run by
+// findCandidateRuns and trivially exceeds the base64 threshold. These
+// tests cover the fix: a URL span's '/' is treated as a hard run boundary,
+// while a '/'-containing run outside any URL span is unaffected.
+
+describe("findUrlSpans", () => {
+  it("finds an http(s) URL span up to the next whitespace", () => {
+    const text = "see https://example.com/a/b for details";
+    const spans = findUrlSpans(text);
+    expect(spans).toHaveLength(1);
+    expect(text.slice(spans[0].start, spans[0].end)).toBe("https://example.com/a/b");
+  });
+
+  it("finds no span in text with no recognized scheme", () => {
+    expect(findUrlSpans("just a/b/c path, no scheme")).toEqual([]);
+  });
+
+  it("finds multiple independent URL spans in one message", () => {
+    const text = "http://one.example/x and https://two.example/y";
+    expect(findUrlSpans(text)).toHaveLength(2);
+  });
+});
+
+describe("findCandidateRuns — URL path separator handling", () => {
+  it("splits a run at '/' boundaries when the run overlaps a detected URL span", () => {
+    const text = "https://example.com/ClarkSource/middleearth/README";
+    const runs = findCandidateRuns(text);
+    expect(runs.map((r) => r.text)).toEqual(["https", "example", "com", "ClarkSource", "middleearth", "README"]);
+  });
+
+  it("does not split a '/'-containing run that falls outside any URL span (regression guard)", () => {
+    const text = "value=aGVsbG8/d29ybGQ end";
+    const runs = findCandidateRuns(text);
+    expect(runs.map((r) => r.text)).toEqual(["value=aGVsbG8/d29ybGQ", "end"]);
+  });
+});
+
+describe("findHighEntropyFindings — URL path false-positive fix", () => {
+  it("does not flag an ordinary multi-segment URL path as one high-entropy blob", () => {
+    // a case-uniform 40-char lowercase hex commit id, glued pre-fix to the
+    // surrounding org/repo/file path segments into one 70+ char base64-
+    // classified run whose diversity trivially clears the 4.5 threshold.
+    const commitId = "0123456789abcdef".repeat(3).slice(0, 40);
+    const url = `https://raw.githubusercontent.com/ClarkSource/middleearth/${commitId}/README`;
+    expect(findHighEntropyFindings(url)).toEqual([]);
+  });
+
+  it("still flags a genuinely high-entropy segment within a URL path", () => {
+    // 36 distinct base64-alphabet characters (0-9, a-z once each):
+    // H = log2(36) ≈ 5.17, comfortably above the 4.5 base64 threshold.
+    const secret = Array.from({ length: 36 }, (_, i) => i.toString(36)).join("");
+    const url = `https://example.com/download/${secret}/file`;
+    const findings = findHighEntropyFindings(url);
+    expect(findings).toHaveLength(1);
+    expect(url.slice(findings[0].start, findings[0].end)).toBe(secret);
+  });
+
+  it("does not affect a base64/hex run outside any URL span", () => {
+    // a base64-shaped run containing '/', with no scheme:// prefix, so no
+    // URL span is detected and the run is scored exactly as before this
+    // change (unsplit).
+    const secret = Array.from({ length: 36 }, (_, i) => i.toString(36)).join("");
+    const withSlash = `${secret.slice(0, 18)}/${secret.slice(18)}`;
+    const text = `value=${withSlash} end`;
+    const findings = findHighEntropyFindings(text);
+    expect(findings).toHaveLength(1);
+    expect(text.slice(findings[0].start, findings[0].end)).toBe(`value=${withSlash}`);
+  });
+
+  it("does not split a run that only straddles into a URL span from outside it (accepted limitation)", () => {
+    // isWithinAnySpan requires full containment, so a run beginning
+    // before a URL span -- containing its own unrelated '/' -- and
+    // merging into the span (e.g. glued directly onto a scheme with no
+    // whitespace/quote break) is left entirely unsplit. Narrow and
+    // practically unreachable in the chat/tool-output text this scanner
+    // targets (a URL is virtually always preceded by whitespace or a
+    // quote there, which already ends the run before the scheme begins).
+    // Documented here as an accepted, intentional limitation rather than
+    // a silently unhandled case: the composite run is scored exactly as
+    // findCandidateRuns did before this change.
+    const secret = Array.from({ length: 20 }, (_, i) => i.toString(36)).join("");
+    const text = `${secret}/rest=https://example.com/a/b end`;
+    const runs = findCandidateRuns(text);
+    expect(runs[0].text).toBe(`${secret}/rest=https`);
   });
 });
