@@ -14,13 +14,14 @@ import {
   isAllowlistedRun,
   findJwtSpans,
   findUrlSpans,
+  findPathSpans,
   findHighEntropyFindings,
   findPasswordCandidateRuns,
   hasLetterCaseMix,
   hasLongClassRun,
   creator,
 } from "../src/entropy-rule.js";
-import { ENTROPY_FIXTURES, SHORT_PASSWORD_FIXTURES } from "./entropy-fixtures.js";
+import { ENTROPY_FIXTURES, SHORT_PASSWORD_FIXTURES, PATH_FIXTURES } from "./entropy-fixtures.js";
 
 const LOG2_36 = Math.log2(36); // 5.169925001442312
 const LOG2_26 = Math.log2(26); // 4.700439718141092
@@ -558,5 +559,186 @@ describe("findHighEntropyFindings — URL path false-positive fix", () => {
     const text = `${secret}/rest=https://example.com/a/b end`;
     const runs = findCandidateRuns(text);
     expect(runs[0].text).toBe(`${secret}/rest=https`);
+  });
+});
+
+// spec: openspec/changes/fix-filesystem-path-entropy-false-positive/specs/high-entropy-secret-detection/spec.md
+//
+// A filesystem path has no `scheme://` prefix, so `findUrlSpans` never
+// covers it: an ordinary `/`-glued path (e.g. a branch/worktree directory
+// name) is otherwise tokenized as one candidate run and can trivially
+// exceed the base64 threshold on character diversity alone, with no
+// secret present. These tests cover the fix: an anchored filesystem path
+// span's `/` is treated as a hard run boundary (same as inside a URL
+// span), while an unanchored `/`-containing run is unaffected, and a
+// span containing a `+`/`=` or fewer than 2 `/` is discarded rather than
+// gating a real base64 blob's split.
+
+describe("findPathSpans", () => {
+  it("finds one span covering a whole POSIX absolute path (T1)", () => {
+    const text = "see /home/user/Projects/xK7bQ2mR9zP4vN6wJ8sL1tY3hG5dF/output for details";
+    const spans = findPathSpans(text);
+    expect(spans).toHaveLength(1);
+    expect(text.slice(spans[0].start, spans[0].end)).toBe(
+      "/home/user/Projects/xK7bQ2mR9zP4vN6wJ8sL1tY3hG5dF/output",  // pragma: allowlist secret
+    );
+  });
+
+  it("covers a backtick-wrapped dot-broken path as a single span (T2 -- proves .worktrees/.venv share one span)", () => {
+    const text = "`/home/user/.worktrees/PLT-885-slack-mention-dm-user-id/.venv`";
+    const spans = findPathSpans(text);
+    expect(spans).toHaveLength(1);
+    expect(spans[0]).toEqual({ start: 1, end: 61 });
+    // Slicing back to the path without either backtick proves the span's
+    // `.`-inclusive body keeps `.worktrees` and `.venv` inside the same
+    // span as the rest of the path, rather than stopping at the first `.`.
+    expect(text.slice(spans[0].start, spans[0].end)).toBe(
+      "/home/user/.worktrees/PLT-885-slack-mention-dm-user-id/.venv",
+    );
+  });
+
+  it("anchors a Windows drive-letter forward-slash path at the drive letter, not the slash (T3)", () => {
+    const text = "C:/Data/Builds/aB3xY7mK9qT2wR5vN8jH1sL4dF6gP0zC/x86_Rel";
+    const spans = findPathSpans(text);
+    expect(spans).toHaveLength(1);
+    expect(spans[0].start).toBe(0);
+    expect(text.slice(spans[0].start, spans[0].end)).toBe(text);
+  });
+
+  it("finds one span each for './', '../', and '~/' relative anchors (T4)", () => {
+    expect(findPathSpans("./a/b/c")).toHaveLength(1);
+    expect(findPathSpans("../a/b/c")).toHaveLength(1);
+    expect(findPathSpans("~/a/b/c")).toHaveLength(1);
+  });
+
+  it("finds a span inside each bracket/quote pairing with no bracket characters included (T5)", () => {
+    const text = "(/etc/hosts) [/tmp/x/y] {/a/b/c} </srv/www/x>";
+    const spans = findPathSpans(text);
+    expect(spans).toHaveLength(4);
+    for (const span of spans) {
+      const matched = text.slice(span.start, span.end);
+      expect(matched).not.toMatch(/[()[\]{}<>]/);
+    }
+  });
+
+  it("finds no span for an anchor not itself sitting at a boundary character (T6)", () => {
+    expect(findPathSpans("PATH=/usr/bin:/usr/local/bin")).toEqual([]);
+    expect(findPathSpans("x=./a/b")).toEqual([]);
+    expect(findPathSpans("...../a/b")).toEqual([]);
+    expect(findPathSpans("no-anchor-here/foo/bar")).toEqual([]);
+    expect(findPathSpans("C:\\Users\\x")).toEqual([]);
+  });
+
+  it("finds no path span for a bare scheme:// URL (already governed by findUrlSpans) (T7)", () => {
+    expect(findPathSpans("https://example.com/a/b")).toEqual([]);
+  });
+
+  it("discards a span whose text contains a '+' (T8)", () => {
+    const secret36 = Array.from({ length: 36 }, (_, i) => i.toString(36)).join("");
+    const text = `"${"/" + secret36.slice(0, 17) + "+" + secret36.slice(17, 18) + "/" + secret36.slice(18)}"`;
+    expect(findPathSpans(text)).toEqual([]);
+  });
+
+  it("discards a span whose text contains an '=' (T9)", () => {
+    const secret36 = Array.from({ length: 36 }, (_, i) => i.toString(36)).join("");
+    const text = `"${"/" + secret36.slice(0, 17) + "/" + secret36.slice(17) + "="}"`;
+    expect(findPathSpans(text)).toEqual([]);
+  });
+
+  it("discards a span containing fewer than 2 total '/' characters (T10)", () => {
+    const secret36 = Array.from({ length: 36 }, (_, i) => i.toString(36)).join("");
+    const text = `"${"/" + secret36}"`;
+    expect(findPathSpans(text)).toEqual([]);
+    expect(findPathSpans("a / b")).toEqual([]);
+  });
+});
+
+describe("findCandidateRuns — filesystem path separator handling", () => {
+  it("splits a run at '/' boundaries when the run falls inside a path span (T11)", () => {
+    const text = "/home/user/Projects/xK7bQ2mR9zP4vN6wJ8sL1tY3hG5dF/output";  // pragma: allowlist secret
+    const runs = findCandidateRuns(text);
+    expect(runs.map((r) => r.text)).toEqual([
+      "home",
+      "user",
+      "Projects",
+      "xK7bQ2mR9zP4vN6wJ8sL1tY3hG5dF",  // pragma: allowlist secret
+      "output",
+    ]);
+  });
+
+  it("does not split a '/'-containing run with no path anchor and no URL span (T12, regression guard)", () => {
+    const text = "value=aGVsbG8/d29ybGQ end";
+    const runs = findCandidateRuns(text);
+    expect(runs.map((r) => r.text)).toEqual(["value=aGVsbG8/d29ybGQ", "end"]);
+  });
+});
+
+describe("findHighEntropyFindings — filesystem path false-positive fix", () => {
+  it("matches expectFinding for every PATH_FIXTURES entry (T13)", () => {
+    for (const fixture of PATH_FIXTURES) {
+      const findings = findHighEntropyFindings(fixture.content);
+      expect(findings.length > 0, `fixture '${fixture.name}' expected finding=${fixture.expectFinding}`).toBe(
+        fixture.expectFinding,
+      );
+    }
+  });
+
+  it("still flags a genuine secret inside a filesystem path (T14)", () => {
+    const secret = Array.from({ length: 36 }, (_, i) => i.toString(36)).join("");
+    const text = `/home/user/tokens/${secret}/file.txt`;
+    const findings = findHighEntropyFindings(text);
+    expect(findings).toHaveLength(1);
+    expect(text.slice(findings[0].start, findings[0].end)).toBe(secret);
+  });
+
+  it("still flags a genuine secret inside a backtick-wrapped filesystem path embedded in a sentence (T15)", () => {
+    const secret = Array.from({ length: 36 }, (_, i) => i.toString(36)).join("");
+    const text = `token found at \`/home/user/tokens/${secret}/file.txt\` in the log`;
+    const findings = findHighEntropyFindings(text);
+    expect(findings).toHaveLength(1);
+    expect(text.slice(findings[0].start, findings[0].end)).toBe(secret);
+  });
+
+  it("false-negative guard: a quoted standard-base64 secret beginning with '/' and containing '+' is still reported whole (T16)", () => {
+    const secret36 = Array.from({ length: 36 }, (_, i) => i.toString(36)).join("");
+    const blob = "/" + secret36.slice(0, 17) + "+" + secret36.slice(17, 18) + "/" + secret36.slice(18);
+    const text = `secret="${blob}" end`;
+    const findings = findHighEntropyFindings(text);
+    expect(findings).toHaveLength(1);
+    expect(text.slice(findings[0].start, findings[0].end)).toBe(blob);
+  });
+
+  it("false-negative guard: a quoted standard-base64 secret with an internal '/' and a trailing '=' is still reported whole (T17)", () => {
+    const secret36 = Array.from({ length: 36 }, (_, i) => i.toString(36)).join("");
+    const blob = "/" + secret36.slice(0, 17) + "/" + secret36.slice(17) + "=";
+    const text = `secret="${blob}" end`;
+    const findings = findHighEntropyFindings(text);
+    expect(findings).toHaveLength(1);
+    expect(text.slice(findings[0].start, findings[0].end)).toBe(blob);
+  });
+
+  it("false-negative guard: a quoted base64 secret beginning with '/' and no other '/' is still reported whole (T18)", () => {
+    const secret36 = Array.from({ length: 36 }, (_, i) => i.toString(36)).join("");
+    const blob = "/" + secret36;
+    const text = `secret="${blob}" end`;
+    const findings = findHighEntropyFindings(text);
+    expect(findings).toHaveLength(1);
+    expect(text.slice(findings[0].start, findings[0].end)).toBe(blob);
+  });
+
+  it("documents the accepted residual false-negative: a genuine secret split by an anchored path span into sub-floor segments is no longer reported (T19)", () => {
+    // A combined run whose full diversity spans multiple short path
+    // segments clears both the 23-char floor and the 4.5 threshold as a
+    // whole, but once its anchored path span causes it to be split on
+    // '/' into segments of 7 characters each, every segment
+    // individually falls below every detection path's floor (base64 23,
+    // hex 9, short-password 14) and none is reported. This is the
+    // deliberate, documented price of an anchor much weaker than
+    // `scheme://` (see design.md Risks / Trade-offs) -- accepted and not
+    // further mitigated.
+    const blob = "/home/user/xK7bQ2z/mR9wQ3f/vN6sL1y/output";  // pragma: allowlist secret
+    expect(shannonEntropy(blob)).toBeGreaterThan(4.5);
+    const text = `secret: ${blob} end`;
+    expect(findHighEntropyFindings(text)).toEqual([]);
   });
 });
