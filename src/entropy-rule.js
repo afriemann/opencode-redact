@@ -11,15 +11,50 @@
 // disjoint by construction.
 const CANDIDATE_RUN_PATTERN = /[A-Za-z0-9+/=_-]+/g;
 
-// See openspec/changes/fix-url-entropy-false-positive: `/` is a legitimate
-// standard-base64 alphabet character AND the URL path separator, so a
-// multi-segment URL path is otherwise glued into one candidate run and
-// trivially exceeds the base64 threshold on diversity alone, with no
-// secret present. `findUrlSpans` detects `scheme://…` spans (any RFC
-// 3986-shaped scheme, not just http/https) so `findCandidateRuns` can
-// treat a run's `/` as a hard boundary when — and only when — that run
-// falls within a detected URL span.
+// See openspec/changes/fix-url-entropy-false-positive and
+// fix-filesystem-path-entropy-false-positive: `/` is a legitimate
+// standard-base64 alphabet character AND both the URL path separator and
+// the filesystem path separator, so a multi-segment URL or filesystem
+// path is otherwise glued into one candidate run and trivially exceeds
+// the base64 threshold on diversity alone, with no secret present.
+// `findUrlSpans` detects `scheme://…` spans (any RFC 3986-shaped scheme,
+// not just http/https) and `findPathSpans` detects anchored filesystem
+// path spans, so `findCandidateRuns` can treat a run's `/` as a hard
+// boundary when — and only when — that run falls within a detected URL
+// span or path span.
 const URL_SPAN_PATTERN = /\b[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s"'<>()]+/g;
+
+// See openspec/changes/fix-filesystem-path-entropy-false-positive
+// design.md D1/D2: the boundary/terminator set is `findUrlSpans`'s set
+// plus backtick and square/curly brackets (backtick is mandatory — the
+// motivating output is Markdown-quoted). A path span runs from a boundary
+// to the next boundary; the fixed-width negative lookbehind checks "the
+// preceding character is not itself a non-boundary character" (true at
+// start-of-string for free), and the greedy body is over every
+// non-boundary character — including `.` — so one span covers a whole
+// dot-broken path rather than only its base64/hex-charset fragments.
+const PATH_SPAN_PATTERN =
+  /(?<![^\s"'`()[\]{}<>])(?:[A-Za-z]:\/|(?:\.\.?|~)\/|\/)[^\s"'`()[\]{}<>]*/g;
+
+/**
+ * See design.md D3: an anchor much weaker than `scheme://` bounds a wider
+ * false-negative surface, so a detected path span is discarded — treated
+ * as an ordinary run, not path-split — when its text contains `+` or `=`
+ * (essentially never present in a real path, common in standard base64)
+ * or when it contains fewer than 2 `/` characters in total (a single
+ * slash is as likely a base64 fragment as a path). This is a post-match
+ * filter, never a pattern-internal lookahead: a lookahead would not
+ * discard the match, it would make the greedy body backtrack to a
+ * shorter span ending just before the disqualifying character, which
+ * would still gate a partial (and wrong) `/`-split of a real base64 blob.
+ */
+function isDiscardedPathSpan(spanText) {
+  if (spanText.includes("+") || spanText.includes("=")) {
+    return true;
+  }
+  const slashCount = (spanText.match(/\//g) ?? []).length;
+  return slashCount < 2;
+}
 
 const HEX_CLASS_PATTERN = /^[0-9a-fA-F]+$/;
 const BASE64_CLASS_PATTERN = /^[A-Za-z0-9+/=_-]+$/;
@@ -81,24 +116,46 @@ export function findUrlSpans(text) {
 }
 
 /**
+ * Finds every anchored filesystem-path-shaped span in `text`: a POSIX
+ * absolute path (`/…`), a Windows drive-letter forward-slash absolute
+ * path (`C:/…`), or a relative path (`./…`, `../…`, `~/…`), each anchor
+ * itself sitting at a boundary character or the start of the text. See
+ * design.md D1-D3 for the full derivation. A matched span is discarded
+ * (and excluded from the returned array) when it contains `+` or `=`, or
+ * fewer than 2 `/` characters in total — see `isDiscardedPathSpan`. Used
+ * only to decide where a candidate run's `/` is a path separator rather
+ * than a base64 continuation character — see `findCandidateRuns`.
+ */
+export function findPathSpans(text) {
+  const spans = [];
+  for (const match of text.matchAll(PATH_SPAN_PATTERN)) {
+    if (isDiscardedPathSpan(match[0])) {
+      continue;
+    }
+    spans.push({ start: match.index, end: match.index + match[0].length });
+  }
+  return spans;
+}
+
+/**
  * Returns every maximal run of the candidate charset in `text`, in source
  * order, as `{ start, end, text }`. Disjoint by construction.
  *
- * A run that overlaps a detected URL span (`findUrlSpans`) and contains
- * `/` is split back into its `/`-delimited segments here, each reported
- * as its own run — a URL path's `/` is a structural separator, not part
- * of a base64 blob, even though `/` is itself a valid base64 character. A
- * run outside any URL span, or one inside a URL span with no `/`, is
- * unaffected.
+ * A run that overlaps a detected URL span (`findUrlSpans`) or a detected
+ * filesystem path span (`findPathSpans`) and contains `/` is split back
+ * into its `/`-delimited segments here, each reported as its own run — a
+ * URL or filesystem path's `/` is a structural separator, not part of a
+ * base64 blob, even though `/` is itself a valid base64 character. A run
+ * outside any such span, or one inside a span with no `/`, is unaffected.
  */
 export function findCandidateRuns(text) {
-  const urlSpans = findUrlSpans(text);
+  const separatorSpans = [...findUrlSpans(text), ...findPathSpans(text)];
   const runs = [];
   for (const match of text.matchAll(CANDIDATE_RUN_PATTERN)) {
     const start = match.index;
     const runText = match[0];
     const end = start + runText.length;
-    if (runText.includes("/") && isWithinAnySpan({ start, end }, urlSpans)) {
+    if (runText.includes("/") && isWithinAnySpan({ start, end }, separatorSpans)) {
       let segmentStart = start;
       for (const segment of runText.split("/")) {
         if (segment.length > 0) {

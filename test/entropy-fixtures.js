@@ -150,3 +150,49 @@ export const SHORT_PASSWORD_FIXTURES = [
   },
 ];
 
+// Verified fixtures for the filesystem-path-span detection path (see the
+// fix-filesystem-path-entropy-false-positive change's design.md). All
+// eight are plain paths (no embedded secret), so they are safe to write
+// as literals here per that design's test plan.
+export const PATH_FIXTURES = [
+  {
+    name: "F1: proposal's reproduction literal (backtick-wrapped .worktrees/.venv path) -- measured H = 4.2398, a near miss below today's 4.5 threshold; a span-detection/documentation fixture, not a regression guard",
+    content: "`/home/user/.worktrees/PLT-885-slack-mention-dm-user-id/.venv`",
+    expectFinding: false,
+  },
+  {
+    name: "F2: POSIX absolute path -- glued run (41 chars) has H = 4.571 and reproduces the false positive; every individual '/'-segment is <=7 chars, well under every detection path's floor (base64 23, hex 9, short-password 14), so the fix reports nothing",
+    content: "/home/user/xK7bQ2z/mR9wQ3f/vN6sL1y/output",  // pragma: allowlist secret
+    expectFinding: false,
+  },
+  {
+    name: "F3: Windows drive-letter forward-slash absolute path -- glued run (37 chars, after the drive-letter prefix) has H = 4.625 and reproduces the false positive; every segment is <=7 chars",
+    content: "C:/Data/xK7bQ2z/mR9wQ3f/vN6sL1y/x86_Rel",
+    expectFinding: false,
+  },
+  {
+    name: "F4: relative '../' path -- glued run (35 chars) has H = 4.569 and reproduces the false positive; every segment is <=7 chars",
+    content: "../builds/xK7bQ2z/mR9wQ3f/vN6sL1y/out",
+    expectFinding: false,
+  },
+  {
+    name: "F5: relative '~/' path -- glued run (38 chars) has H = 4.732 and reproduces the false positive; every segment is <=8 chars",
+    content: "~/projects/xK7bQ2z/mR9wQ3f/vN6sL1y/data",
+    expectFinding: false,
+  },
+  {
+    name: "F6: relative './' path -- glued run (40 chars) has H = 4.682 and reproduces the false positive; every segment is <=8 chars",
+    content: "./builds/xK7bQ2z/mR9wQ3f/vN6sL1y/artifact",
+    expectFinding: false,
+  },
+  {
+    name: "F7: real-world framing -- backtick-quoted path embedded mid-sentence in tool output; span must start after the backtick",
+    content: "warning: `/home/user/xK7bQ2z/mR9wQ3f/vN6sL1y/output` was ignored",
+    expectFinding: false,
+  },
+  {
+    name: "F8: native Windows backslash path -- asserts the no-change claim (backslash was never in the candidate charset, so this already tokenizes into short segments below the 23-char floor)",
+    content: "C:\\Users\\jdoe\\AppData\\Local\\Temp\\BuildOutput-2024Q3\\x86_Rel",
+    expectFinding: false,
+  },
+];
