@@ -35,9 +35,9 @@
 
 ## 4. Verification and review
 
-- [ ] 4.1 Perform the mandatory self-review-for-simplification pass on the
+- [x] 4.1 Perform the mandatory self-review-for-simplification pass on the
       diff (duplication, code smells, overengineering, redundant comments)
       and verify each finding is fixed inline or documented as intentional.
-- [ ] 4.2 Get the change reviewed by `code-reviewer` and `security`; verify
+- [x] 4.2 Get the change reviewed by `code-reviewer` and `security`; verify
       every `[BLOCKER]` is resolved and every `[WARNING]` has a documented
       disposition.
