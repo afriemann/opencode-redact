@@ -36,6 +36,35 @@ describe("expandToTokenBoundaries", () => {
     const text = "TOKEN";
     expect(expandToTokenBoundaries(text, 0, text.length)).toEqual([0, text.length]);
   });
+
+  it("Stops expansion at a structural delimiter in dense JSON", () => {
+    // A compact, single-line JSON object with two string fields and no
+    // whitespace anywhere: a finding in field "a" must stay bounded by its
+    // own surrounding quotes and not swallow field "b" or the rest of the
+    // document.
+    const text = '{"a":"AAAAAAAAAAAAAAAAAAAAAAA","b":"BBBBBBBBBBBBBBBBBBBBBBB"}';
+    const value = "A".repeat(23);
+    const start = text.indexOf(value);
+    const end = start + value.length;
+    // shrink the reported range so it only partially covers the value
+    const partialStart = start + 2;
+    const partialEnd = end - 2;
+    expect(expandToTokenBoundaries(text, partialStart, partialEnd)).toEqual([start, end]);
+  });
+
+  it.each([
+    ['"', '"'],
+    ["'", "'"],
+    ["`", "`"],
+    [",", ","], // comma is its own open/close pair, not a mismatched typo
+    ["{", "}"],
+    ["[", "]"],
+  ])("stops expansion at a %s delimiter with no whitespace present", (open, close) => {
+    const text = `prefix${open}SECRETVALUE${close}suffix`;
+    const start = text.indexOf("SECRETVALUE");
+    const end = start + "SECRETVALUE".length;
+    expect(expandToTokenBoundaries(text, start + 1, end - 1)).toEqual([start, end]);
+  });
 });
 
 describe("normalizeRanges", () => {

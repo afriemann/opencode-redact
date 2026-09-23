@@ -289,10 +289,17 @@ rm ~/.config/opencode/plugins/opencode-redact.js
 - **Detection is heuristic, not a guarantee.** The recommend preset is
   vendor-pattern-based and will not catch bespoke or opaque secret formats
   — mitigated, but not eliminated, by high-entropy detection (see above).
-- **Over-redaction is possible** on dense, single-line content (e.g.
-  minified JSON) — a finding there expands to the whole line. This is the
-  safe direction for a security control, and the annotation warns the model
-  not to write the placeholder back.
+- **Over-redaction is still possible**, though narrower in scope, on dense
+  content with no whitespace at all between tokens. Redaction range
+  expansion (`expandToTokenBoundaries` in `src/redact.js`) stops at
+  whitespace or a structural delimiter (`" ' \` , { } [ ]`), so a finding
+  inside minified JSON expands only to its enclosing value — up to the
+  surrounding quote, comma, or bracket — not the entire document. Content
+  that is dense in some *other* way (e.g. a long path or query string with
+  no whitespace and none of those delimiter characters) can still expand
+  further than the exact secret. This is the safe direction for a security
+  control, and the annotation warns the model not to write the placeholder
+  back.
 - **Configuration is limited to one setting** (`disableHighEntropy` in
   `redact.jsonc` — see "Configuration" above); no per-rule enable/disable
   beyond that, no custom allowlist, no threshold tuning.
