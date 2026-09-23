@@ -2,21 +2,41 @@
 // injected as a parameter, so this module is testable without invoking a real
 // scanner. See design.md D1.
 
-const WHITESPACE_PATTERN = /\s/;
+// Structural delimiter characters that stop expansion the same way
+// whitespace does. Verified (see openspec/changes/narrow-token-boundary-expansion
+// /proposal.md "Verified safety invariant") to never appear inside any
+// secret shape this plugin can detect:
+//   - this plugin's own entropy candidate charsets (CANDIDATE_RUN_PATTERN,
+//     PASSWORD_CANDIDATE_PATTERN in entropy-rule.js) exclude all of these
+//     characters at tokenization time, before scoring even starts;
+//   - every reachable secretlint vendor-pattern rule's own regex match
+//     already reports a range terminating at, or beyond, the true secret
+//     boundary, so expansion (which only ever grows outward) never needs
+//     to cross one of these characters to reach the rest of a real secret.
+// This second half of the invariant depends on the installed secretlint /
+// @secretlint/secretlint-rule-preset-recommend version's rule
+// implementations continuing to report complete ranges — re-verify this
+// comment's claim on any bump of that dependency.
+// `:` `;` `(` `)` `<` `>` `|` `&` `=` `?` `/` are deliberately excluded:
+// several of those can legitimately appear inside a URL, database
+// connection string, or password value, so treating them as boundaries
+// risks truncating part of a real secret.
+const BOUNDARY_PATTERN = /[\s"'`,{}[\]]/;
 
 /**
- * Expands [start, end) outward to the nearest surrounding whitespace so a
- * finding whose reported range only partially covers its secret does not
- * leave a fragment of that secret in the output. Never expands past the
- * bounds of `text`.
+ * Expands [start, end) outward to the nearest surrounding whitespace or
+ * structural delimiter character (quote, comma, or bracket — see
+ * `BOUNDARY_PATTERN` above) so a finding whose reported range only
+ * partially covers its secret does not leave a fragment of that secret in
+ * the output. Never expands past the bounds of `text`.
  */
 export function expandToTokenBoundaries(text, start, end) {
   let newStart = start;
-  while (newStart > 0 && !WHITESPACE_PATTERN.test(text[newStart - 1])) {
+  while (newStart > 0 && !BOUNDARY_PATTERN.test(text[newStart - 1])) {
     newStart -= 1;
   }
   let newEnd = end;
-  while (newEnd < text.length && !WHITESPACE_PATTERN.test(text[newEnd])) {
+  while (newEnd < text.length && !BOUNDARY_PATTERN.test(text[newEnd])) {
     newEnd += 1;
   }
   return [newStart, newEnd];
