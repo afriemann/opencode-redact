@@ -27,13 +27,14 @@ function fakeV1Client() {
  * shape (design.md "Verified platform facts").
  */
 function fakeV2Ctx() {
-  const hooks = { "execute.after": null, prompt: null, context: null, generate: null, compaction: null };
+  const hooks = { "execute.after": null, prompt: null, context: null, generate: null, compaction: null, title: null };
   const disposals = {
     "execute.after": vi.fn().mockResolvedValue(undefined),
     prompt: vi.fn().mockResolvedValue(undefined),
     context: vi.fn().mockResolvedValue(undefined),
     generate: vi.fn().mockResolvedValue(undefined),
     compaction: vi.fn().mockResolvedValue(undefined),
+    title: vi.fn().mockResolvedValue(undefined),
   };
   const ctx = {
     tool: {
@@ -114,6 +115,15 @@ describe("V1/V2 adapter conformance — tool-output redaction", () => {
       }
     });
   }
+  it("V1 tool.execute.after redacts a secret in metadata (parity with V2)", async () => {
+    const { v1Hooks } = await loadV1();
+    const secret = RULE_FIXTURES[0].content;
+    const v1Output = { output: "clean text", metadata: { note: `leak=${secret}` } };
+    await v1Hooks["tool.execute.after"]({ tool: "bash" }, v1Output);
+    expect(v1Output.output).toBe("clean text");
+    expect(v1Output.metadata.note).toContain("***REDACTED:");
+    expect(v1Output.metadata.note).not.toContain(secret);
+  });
 });
 
 describe("V1/V2 adapter conformance — user-message redaction", () => {
@@ -192,12 +202,24 @@ describe("V1/V2 adapter conformance — user-message redaction", () => {
 });
 
 describe("V2-only shape-specific cases", () => {
-  it("execute.after: a status:\"error\" event is never scanned (design.md D6a)", async () => {
+  it('execute.after: redacts a secret in a non-enumerable error message (Tool.Error shape)', async () => {
     const { hooks } = await loadV2();
-    const event = { tool: "bash", status: "error", error: { message: `leak ${RULE_FIXTURES[0].content}` } };
-    const before = JSON.stringify(event);
+    const secret = RULE_FIXTURES[0].content;
+    const error = { metadata: { note: `meta ${secret}` } };
+    // Host `Tool.Error.message`/`.stack` are non-enumerable own properties;
+    // simulate that so a regression back to `Object.keys` fails here.
+    Object.defineProperty(error, "message", {
+      value: `leak ${secret}`,
+      enumerable: false,
+      writable: true,
+      configurable: true,
+    });
+    const event = { tool: "bash", status: "error", error };
     await hooks["execute.after"](event);
-    expect(JSON.stringify(event)).toBe(before);
+    expect(event.error.message).toContain("***REDACTED:");
+    expect(event.error.message).not.toContain(secret);
+    expect(event.error.metadata.note).toContain("***REDACTED:");
+    expect(event.error.metadata.note).not.toContain(secret);
   });
 
   it("execute.after: Content[] walk redacts text blocks, leaves file blocks untouched, one annotation on the last redacted block", async () => {
@@ -292,6 +314,16 @@ describe("V2-only shape-specific cases", () => {
     expect(JSON.stringify(event.result.output)).toBe(before);
   });
 
+  it("execute.after: annotates a redaction carried only by a structured output.output (content absent)", async () => {
+    const { hooks } = await loadV2();
+    const secret = RULE_FIXTURES[0].content;
+    const event = { tool: "shell", status: "completed", result: { output: { exit: 0, output: `leak=${secret}` } } };
+    await hooks["execute.after"](event);
+    expect(event.result.output.output).toContain("***REDACTED:");
+    expect(event.result.output.output).not.toContain(secret);
+    expect(event.result.output.output).toContain("[opencode-redact]");
+  });
+
   it("execute.after: event.result is replaced wholesale (readonly fields)", async () => {
     const { hooks } = await loadV2();
     const secret = RULE_FIXTURES[0].content;
@@ -337,7 +369,7 @@ describe("V2-only shape-specific cases", () => {
 
 // spec: openspec/specs/request-payload-redaction/spec.md
 describe("V2-only shape-specific cases — session context/generate/compaction hooks", () => {
-  const HOOK_NAMES = ["context", "generate", "compaction"];
+  const HOOK_NAMES = ["context", "generate", "compaction", "title"];
 
   it("setup registers context, generate, and compaction session hooks", async () => {
     const { ctx } = await loadV2();
@@ -386,7 +418,7 @@ describe("V2-only shape-specific cases — session context/generate/compaction h
       expect(event.messages[0].content[0].text).not.toContain(secret);
     });
 
-    it(`${name}: non-text message content is left untouched`, async () => {
+    it(`${name}: redacts a secret in a tool-call input (tightened)`, async () => {
       const { hooks } = await loadV2();
       const secret = RULE_FIXTURES[0].content;
       const toolCallBlock = { type: "tool-call", id: "1", name: "bash", input: { cmd: `leak=${secret}` } };
@@ -396,7 +428,217 @@ describe("V2-only shape-specific cases — session context/generate/compaction h
         messages: [{ role: "assistant", content: [toolCallBlock] }],
       };
       await hooks[name](event);
-      expect(event.messages[0].content[0]).toBe(toolCallBlock);
+      expect(event.messages[0].content[0].input.cmd).toContain("***REDACTED:");
+      expect(event.messages[0].content[0].input.cmd).not.toContain(secret);
+    });
+
+    it(`${name}: redacts a secret in a tool-result value (tightened)`, async () => {
+      const { hooks } = await loadV2();
+      const secret = RULE_FIXTURES[0].content;
+      const event = {
+        sessionID: "s1",
+        system: [],
+        messages: [
+          {
+            role: "tool",
+            content: [
+              {
+                type: "tool-result",
+                id: "1",
+                name: "bash",
+                result: { type: "error", value: { message: `leak ${secret}` } },
+              },
+            ],
+          },
+        ],
+      };
+      await hooks[name](event);
+      const serialized = JSON.stringify(event.messages[0].content[0]);
+      expect(serialized).toContain("***REDACTED:");
+      expect(serialized).not.toContain(secret);
+    });
+
+    it(`${name}: redacts a non-enumerable message inside a tool-result value (tightened)`, async () => {
+      const { hooks } = await loadV2();
+      const secret = RULE_FIXTURES[0].content;
+      const value = {};
+      Object.defineProperty(value, "message", {
+        value: `leak ${secret}`,
+        enumerable: false,
+        writable: true,
+        configurable: true,
+      });
+      const event = {
+        sessionID: "s1",
+        system: [],
+        messages: [
+          {
+            role: "tool",
+            content: [
+              { type: "tool-result", id: "1", name: "bash", result: { type: "error", value } },
+            ],
+          },
+        ],
+      };
+      await hooks[name](event);
+      const stored = event.messages[0].content[0].result.value;
+      expect(stored.message).toContain("***REDACTED:");
+      expect(stored.message).not.toContain(secret);
+    });
+
+    it(`${name}: leaves a reasoning part with its providerMetadata untouched (signed-reasoning exemption)`, async () => {
+      const { hooks } = await loadV2();
+      const secret = RULE_FIXTURES[0].content;
+      const reasoningPart = {
+        type: "reasoning",
+        text: `think ${secret}`,
+        providerMetadata: { anthropic: { signature: "sig-for-signed-thinking", redacted: false } },
+      };
+      const event = {
+        sessionID: "s1",
+        system: [],
+        messages: [{ role: "assistant", content: [reasoningPart] }],
+      };
+      await hooks[name](event);
+      expect(event.messages[0].content[0]).toBe(reasoningPart);
+      expect(event.messages[0].content[0].text).toBe(`think ${secret}`);
+      expect(event.messages[0].content[0].providerMetadata).toEqual({
+        anthropic: { signature: "sig-for-signed-thinking", redacted: false },
+      });
+    });
+
+    it(`${name}: a tool-call/tool-result-only redaction has no text part to annotate`, async () => {
+      // Ownership + annotation coverage (review comment 2, and the spec's
+      // "No text-bearing part to carry the annotation" scenario): when every
+      // redaction lands in a part with no `.text`, the payload is still
+      // redacted, but no annotation is appended because no text-bearing part
+      // exists to carry it. The genuine copy-on-write guarantees are pinned
+      // by the deep-frozen-parts and untouched-originals tests below.
+      const { hooks } = await loadV2();
+      const secret = RULE_FIXTURES[0].content;
+      const event = {
+        sessionID: "s1",
+        system: [],
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "tool-call", id: "1", name: "bash", input: { cmd: `echo ${secret}` } },
+              {
+                type: "tool-result",
+                id: "1",
+                name: "bash",
+                result: { type: "json", value: { out: `leak ${secret}` } },
+              },
+            ],
+          },
+        ],
+      };
+      await hooks[name](event);
+      const content = event.messages[0].content;
+      expect(content[0].input.cmd).toContain("***REDACTED:");
+      expect(content[0].input.cmd).not.toContain(secret);
+      expect(content[1].result.value.out).toContain("***REDACTED:");
+      expect(content[1].result.value.out).not.toContain(secret);
+      // No text-bearing part exists, so no annotation is appended anywhere.
+      expect(JSON.stringify(content)).not.toContain("[opencode-redact]");
+    });
+
+    it(`${name}: annotates a compaction redaction (a text-bearing part)`, async () => {
+      // The note goes on the last redacted part that carries a string `.text`,
+      // which now also covers a `compaction` summary (previously text-only).
+      const { hooks } = await loadV2();
+      const secret = RULE_FIXTURES[0].content;
+      const event = {
+        sessionID: "s1",
+        system: [],
+        messages: [{ role: "assistant", content: [{ type: "compaction", text: `summary ${secret}` }] }],
+      };
+      await hooks[name](event);
+      const part = event.messages[0].content[0];
+      expect(part.text).toContain("***REDACTED:");
+      expect(part.text).not.toContain(secret);
+      expect(part.text).toContain("[opencode-redact]");
+    });
+
+    it(`${name}: writes only fresh array slots — deep-frozen part objects are never modified`, async () => {
+      // The real copy-on-write pin for the review's ownership request: array
+      // slots are replaced, but no part object and no nested container is
+      // ever written in place. Freezing every part recursively makes any
+      // in-place write throw (strict mode), failing the test loudly instead
+      // of asserting the negative.
+      const deepFreeze = (value) => {
+        if (value && typeof value === "object" && !Object.isFrozen(value)) {
+          Object.freeze(value);
+          for (const key of Object.getOwnPropertyNames(value)) deepFreeze(value[key]);
+        }
+        return value;
+      };
+      const { hooks } = await loadV2();
+      const secret = RULE_FIXTURES[0].content;
+      const systemSeg = deepFreeze({ type: "text", text: `sys ${secret}` });
+      const textPart = deepFreeze({ type: "text", text: `msg ${secret}` });
+      const callPart = deepFreeze({ type: "tool-call", id: "1", name: "bash", input: { cmd: `echo ${secret}` } });
+      const resultPart = deepFreeze({
+        type: "tool-result",
+        id: "1",
+        name: "bash",
+        result: { type: "json", value: { out: `leak ${secret}` } },
+      });
+      const event = {
+        sessionID: "s1",
+        system: [systemSeg],
+        messages: [{ role: "assistant", content: [textPart, callPart, resultPart] }],
+      };
+      await expect(hooks[name](event)).resolves.toBeUndefined();
+      expect(JSON.stringify(event)).toContain("***REDACTED:");
+      expect(JSON.stringify(event)).not.toContain(secret);
+    });
+
+    it(`${name}: replaced slots leave the original part objects untouched`, async () => {
+      const { hooks } = await loadV2();
+      const secret = RULE_FIXTURES[0].content;
+      const textPart = { type: "text", text: `msg ${secret}` };
+      const callPart = { type: "tool-call", id: "1", name: "bash", input: { cmd: `echo ${secret}` } };
+      const resultPart = {
+        type: "tool-result",
+        id: "1",
+        name: "bash",
+        result: { type: "json", value: { out: `leak ${secret}` } },
+      };
+      const untouchedText = { type: "text", text: "nothing sensitive here" };
+      const event = {
+        sessionID: "s1",
+        system: [],
+        messages: [{ role: "assistant", content: [textPart, callPart, resultPart, untouchedText] }],
+      };
+      await hooks[name](event);
+      const content = event.messages[0].content;
+      expect(content[0]).not.toBe(textPart);
+      expect(content[1]).not.toBe(callPart);
+      expect(content[2]).not.toBe(resultPart);
+      expect(content[3]).toBe(untouchedText);
+      // The ORIGINAL inputs the host still holds keep their raw values.
+      expect(textPart.text).toBe(`msg ${secret}`);
+      expect(callPart.input.cmd).toBe(`echo ${secret}`);
+      expect(resultPart.result.value.out).toBe(`leak ${secret}`);
+    });
+
+    it(`${name}: leaves media and effort parts untouched`, async () => {
+      const { hooks } = await loadV2();
+      const mediaPart = {
+        type: "media",
+        media: { source: { type: "base64", data: "AAAA", mediaType: "image/png" } },
+      };
+      const effortPart = { type: "effort", effort: "high" };
+      const event = {
+        sessionID: "s1",
+        system: [],
+        messages: [{ role: "assistant", content: [mediaPart, effortPart] }],
+      };
+      await hooks[name](event);
+      expect(event.messages[0].content[0]).toBe(mediaPart);
+      expect(event.messages[0].content[1]).toBe(effortPart);
     });
 
     it(`${name}: one annotation for multiple redactions in the system prompt`, async () => {
@@ -583,7 +825,7 @@ describe("lifecycle", () => {
     expect(ctx.session.hook).toHaveBeenCalledWith("generate", expect.any(Function));
     expect(ctx.session.hook).toHaveBeenCalledWith("compaction", expect.any(Function));
     await cleanup();
-    for (const key of ["execute.after", "prompt", "context", "generate", "compaction"]) {
+    for (const key of ["execute.after", "prompt", "context", "generate", "compaction", "title"]) {
       expect(disposals[key]).toHaveBeenCalled();
     }
   });

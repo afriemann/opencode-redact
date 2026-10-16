@@ -212,16 +212,29 @@ npm install
 ln -s "$(pwd)/src/plugin.v1.js" ~/.config/opencode/plugins/opencode-redact.js
 ```
 
-**V2:** add this package (or a local path) to `opencode.json(c)`'s `plugins`
-array, or drop `src/plugin.v2.js` directly into a project's or the global
-`.opencode/plugins/` directory. Note: `.opencode/plugins/` scans every `.js`
-file placed directly inside it as its own candidate plugin — this plugin's
-other source files (`redact.js`, `secretlint.js`, `config.js`, etc.) must
-never be copied alongside `plugin.v2.js` there; they are resolved via normal
-`node_modules` package resolution when installed as a real dependency.
+**V2:** OpenCode v2 requires a plugin whose default export is `{ id, setup }`.
+This package's own default export (`.`) is the **V1** adapter, so listing
+`"opencode-redact"` directly in the plugin list does **not** work on v2 — the
+loader rejects the V1 entry with a `PluginModule.LoadError`. Load the `/v2`
+entrypoint explicitly through a one-line shim in an `.opencode/plugins/`
+directory (project or global):
 
-Restart opencode. No further configuration is needed — there is no config
-file in v1 (see "Known limitations").
+```js
+// .opencode/plugins/opencode-redact.ts
+export { default } from "opencode-redact/v2";             // package in node_modules
+// or, from a local checkout:
+// export { default } from "/abs/path/opencode-redact/src/plugin.v2.js";
+```
+
+The shim re-exports the real adapter, so its sibling modules (`redact.js`,
+`secretlint.js`, `config.js`) and the `@secretlint/*` dependencies resolve
+from the package's own `node_modules` — do not copy those files next to the
+shim. If you use the config `plugins` array instead, note it accepts package
+names or **directory** targets only; a bare absolute *file* path is rejected
+with `configured plugin path must be a directory`.
+
+Restart opencode. No further configuration is needed — the only setting
+(high-entropy on/off) lives in `redact.jsonc` (see "Configuration").
 
 Unlike some other plugins with a peer dependency on `@opencode-ai/plugin`,
 this plugin needs no additional symlink step for its own dependencies — a
@@ -283,8 +296,20 @@ rm ~/.config/opencode/plugins/opencode-redact.js
   truncates very large tool output to a managed on-disk retention path
   *before* this hook runs; redacting the in-context string does not redact
   that spill file.
-- **`output.metadata` and `output.attachments` are not scanned** — only
-  `output.output`.
+- **`output.attachments` is not scanned.** Tool-result `metadata` IS scanned
+  (a V1-parity fix in this plugin); `attachments` carries references/URLs,
+  not inline text, so it is left untouched by the redactor.
+- **Provider-signed reasoning is not redacted.** In the V2 session hooks, a
+  `reasoning` part is left completely untouched — its text and its
+  `providerMetadata` (proof-of-generation: Anthropic signature, Gemini
+  thought signature, OpenAI encrypted content) travel as generated, because
+  Anthropic and AWS Bedrock reject requests whose thinking blocks were
+  modified after generation. A secret inside such a part is intentionally
+  not replaced; redacting signed reasoning needs a provider-compatible
+  confidentiality policy and a tool-use/replay regression test, tracked as
+  a follow-up. Refs:
+  [Anthropic — extended thinking](https://platform.claude.com/docs/en/build-with-claude/thinking),
+  [AWS Bedrock — conversation inference](https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference.html).
 - **The GCP p12 (binary) check never fires.** The GCP rule only runs when
   the scanned content's extension is `.json` or `.p12`; this plugin detects
   JSON-shaped text automatically and scans it as `.json`, but `.p12` is a
@@ -401,6 +426,32 @@ rm ~/.config/opencode/plugins/opencode-redact.js
   because such punctuation splits the candidate into shorter fragments the
   same way it always has. A password built entirely from the 10 included
   symbols plus letters and digits is unaffected.
+
+## History and request ownership
+
+Every path this plugin writes is either a provider-bound payload or a record
+the host explicitly surfaces through a hook — and it is deliberately one or
+the other, never both by accident:
+
+- **Session hooks (`context` / `generate` / `compaction`).** The host
+  derives the hook-bound `system`/`messages` fresh on every provider call
+  and consumes the hook's result only for the outgoing request; the
+  session's persisted message history is re-derived from storage on the
+  next call and is not reachable through the hook event. The handler
+  therefore replaces array *slots* copy-on-write: no part object or shared
+  nested object is written in place (pinned by deep-frozen-parts,
+  identity, and untouched-original tests in
+  `test/plugin-conformance.test.js`). The full trace against v2.0.26
+  source is in `docs/v2-compat-audit.md`, "Update — 2026-10-14".
+- **`tool.execute.after`.** By upstream hook semantics (V1 parity), the
+  object this hook receives backs the tool's visible result (and, for an
+  error, the execution's `Tool.Error` the host persists). Redacting it
+  therefore rewrites both the provider-bound payload and the tool record —
+  intended: the placeholder the provider sees is the one the record keeps,
+  and the plugin's annotation tells any later reader why.
+- **Provider-signed reasoning is untouched on every path.** See
+  "Known limitations" above; scanning it requires a provider-compatible
+  confidentiality policy and is tracked as a follow-up.
 
 ## Development
 
