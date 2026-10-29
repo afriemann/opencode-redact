@@ -1,5 +1,5 @@
-// spec: openspec/changes/v2-plugin-migration/specs/tool-output-redaction/spec.md
-// spec: openspec/changes/v2-plugin-migration/specs/user-message-redaction/spec.md
+// spec: openspec/specs/tool-output-redaction/spec.md
+// spec: openspec/specs/user-message-redaction/spec.md
 //
 // Layer-2 adapter-conformance suite (design.md D9): drives a shared fixture
 // corpus through a fake V1 host and a fake V2 ctx, asserting the two
