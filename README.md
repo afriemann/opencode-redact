@@ -139,6 +139,20 @@ vendor, alongside (not instead of) the pattern-based rules.
     `sha1-`/`sha384-`/`sha512-` likewise) — this is specifically what keeps
     `npm install`'s own `package-lock.json` from tripping this plugin on
     every dependency.
+- **URLs, filesystem paths, and decimal numbers are not entropy-scored.**
+  This applies to both the generic and short-password checks. Complete
+  `scheme://` URLs (including userinfo, query, and fragment), anchored Linux
+  paths, and Windows drive, UNC, and dot/home-relative paths are exempt.
+  Numbers include signed integers, decimals, and scientific notation, both
+  standalone and assigned to an identifier with `=` or `:`. Numeric-looking
+  fragments inside other tokens are not exempt.
+  URL/path spans end at whitespace, quotes, backticks, or brackets; commas
+  and semicolons remain part of the span. Unanchored `name/file` strings
+  are not treated as filesystem paths.
+  **Trade-off:** opaque secrets inside exempt URLs or filenames, and secrets
+  consisting entirely of numeric values, are no longer caught by entropy alone.
+  Explicit secret-pattern rules still run,
+  and JWT signature detection remains active, including inside those spans.
 - **JWTs are handled specially.** A JWT's header and payload are not scored
   (they're expected to be readable claims, not secret material); its
   signature segment — the part that actually makes the token usable — is
