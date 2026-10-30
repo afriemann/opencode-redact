@@ -214,6 +214,31 @@ describe("isAllowlistedRun", () => {
     expect(isAllowlistedRun("550e8400-e29b-41d4-a716-446655440000-REALSECRET")).toBe(false);
   });
 
+  it("exempts an opencode session identifier", () => {
+    expect(isAllowlistedRun("ses_4Qe7Lk2Vb9Xr1Tn8Hc3Mz6Wd0J")).toBe(true); // pragma: allowlist secret
+  });
+
+  it.each(["ses", "msg", "prt", "per", "psv", "frm", "wrk", "evt", "sh", "cred", "pty", "con"])(
+    "exempts an opencode identifier with the %s_ prefix",
+    (prefix) => {
+      expect(isAllowlistedRun(`${prefix}_4Qe7Lk2Vb9Xr1Tn8Hc3Mz6Wd0J`)).toBe(true);
+    },
+  );
+
+  it("does not exempt an opencode identifier with a secret glued to it", () => {
+    expect(isAllowlistedRun("ses_4Qe7Lk2Vb9Xr1Tn8Hc3Mz6Wd0J-REALSECRET")).toBe(false); // pragma: allowlist secret
+    expect(isAllowlistedRun("REALSECRET-ses_4Qe7Lk2Vb9Xr1Tn8Hc3Mz6Wd0J")).toBe(false); // pragma: allowlist secret
+  });
+
+  it("does not exempt an opencode-prefixed run with a suffix of the wrong length", () => {
+    expect(isAllowlistedRun("ses_4Qe7Lk2Vb9Xr1Tn8Hc3Mz6Wd0")).toBe(false); // pragma: allowlist secret
+    expect(isAllowlistedRun("ses_4Qe7Lk2Vb9Xr1Tn8Hc3Mz6Wd0Jx")).toBe(false); // pragma: allowlist secret
+  });
+
+  it("does not exempt an unknown prefix with a 26-character base-62 suffix", () => {
+    expect(isAllowlistedRun("foo_4Qe7Lk2Vb9Xr1Tn8Hc3Mz6Wd0J")).toBe(false); // pragma: allowlist secret
+  });
+
   it("exempts a Subresource Integrity hash", () => {
     expect(isAllowlistedRun("sha512-2eDaqheYQiOtbY2wR2Ck2AiwPRXJhrZ0Nc/l5MMjhqZ1PbNr2gDkG9pW+GYA/JzOTkyCcz4LgN")).toBe(
       true,

@@ -197,6 +197,11 @@ const UUID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{
 // base64 digest is indistinguishable from a base64-encoded API secret and
 // is deliberately NOT exempted.
 const SRI_PATTERN = /^sha(?:1|256|384|512)-[A-Za-z0-9+/_-]+={0,2}$/;
+// Shape #4: opencode-generated identifier (`ses_`, `msg_`, ...): a known
+// prefix, an underscore, then exactly 26 base-62 characters. Anchored to the
+// whole run so a secret glued onto an identifier is still reported.
+const OPENCODE_ID_PATTERN =
+  /^(?:ses|msg|prt|per|psv|frm|wrk|evt|sh|cred|pty|con)_[0-9A-Za-z]{26}$/;
 
 /**
  * Returns true when `run` matches one of the anchored allowlist shapes
@@ -204,7 +209,12 @@ const SRI_PATTERN = /^sha(?:1|256|384|512)-[A-Za-z0-9+/_-]+={0,2}$/;
  * should never be reported, regardless of its measured entropy.
  */
 export function isAllowlistedRun(run) {
-  return GIT_OR_DIGEST_HEX_PATTERN.test(run) || UUID_PATTERN.test(run) || SRI_PATTERN.test(run);
+  return (
+    GIT_OR_DIGEST_HEX_PATTERN.test(run) ||
+    UUID_PATTERN.test(run) ||
+    SRI_PATTERN.test(run) ||
+    OPENCODE_ID_PATTERN.test(run)
+  );
 }
 
 // D5 #4: a JWT cannot be matched as a single candidate run (`.` is not in
