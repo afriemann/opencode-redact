@@ -2,12 +2,12 @@
 
 ## 1. Red step
 
-- [ ] 1.1 Add failing tests in `test/entropy-rule.test.js` for each scenario of "Exempt Opencode Identifiers From Detection" (session, other prefixes, glued secret, wrong suffix length, unknown prefix); verify they fail on the current code
+- [x] 1.1 Add failing tests in `test/entropy-rule.test.js` for each scenario of "Exempt Opencode Identifiers From Detection" (session, other prefixes, glued secret, wrong suffix length, unknown prefix); verify they fail on the current code
 
 ## 2. Implementation
 
-- [ ] 2.1 In `src/entropy-rule.js`, add an anchored `OPENCODE_ID_PATTERN` for the listed prefixes plus `_` plus 26 base-62 characters, and include it in `isAllowlistedRun`; verify the step 1.1 tests pass
-- [ ] 2.2 Verify the existing suite passes with `npm test`, including the existing allowlist fixtures
+- [x] 2.1 In `src/entropy-rule.js`, add an anchored `OPENCODE_ID_PATTERN` for the listed prefixes plus `_` plus 26 base-62 characters, and include it in `isAllowlistedRun`; verify the step 1.1 tests pass
+- [x] 2.2 Verify the existing suite passes with `npm test`, including the existing allowlist fixtures
 
 ## Workflow follow-up
 
