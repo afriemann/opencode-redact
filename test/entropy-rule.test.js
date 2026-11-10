@@ -244,6 +244,33 @@ describe("isAllowlistedRun", () => {
     expect(isAllowlistedRun("ses_4Qe7Lk2Vb9Xr1Tn8Hc3Mz6Wd0Jx")).toBe(false); // pragma: allowlist secret
   });
 
+  // spec: openspec/specs/high-entropy-secret-detection/spec.md
+  const idSuffix = (n) => "A1b2C3d4E5".repeat(5).slice(0, n); // pragma: allowlist secret
+
+  it.each(["toolu_bdrk_", "toolu_vrtx_", "toolu_"])(
+    "Exempts an Anthropic-style tool-call identifier (%s)",
+    (prefix) => {
+      expect(isAllowlistedRun(`${prefix}${idSuffix(24)}`)).toBe(true);
+    },
+  );
+
+  it("Exempts an OpenAI-style tool-call identifier", () => {
+    expect(isAllowlistedRun(`call_${idSuffix(24)}`)).toBe(true);
+  });
+
+  it("Still reports a secret glued to a tool-call identifier", () => {
+    expect(isAllowlistedRun(`toolu_bdrk_${idSuffix(24)}${idSuffix(24)}`)).toBe(false);
+    expect(isAllowlistedRun(`xcall_${idSuffix(24)}`)).toBe(false);
+    expect(isAllowlistedRun(`call_${idSuffix(24)}-${idSuffix(8)}`)).toBe(false);
+  });
+
+  it("bounds a tool-call identifier suffix to 20-40 characters", () => {
+    expect(isAllowlistedRun(`call_${idSuffix(20)}`)).toBe(true);
+    expect(isAllowlistedRun(`call_${idSuffix(40)}`)).toBe(true);
+    expect(isAllowlistedRun(`call_${idSuffix(19)}`)).toBe(false);
+    expect(isAllowlistedRun(`call_${idSuffix(41)}`)).toBe(false);
+  });
+
   it("does not exempt an unknown prefix with a 26-character base-62 suffix", () => {
     expect(isAllowlistedRun("foo_4Qe7Lk2Vb9Xr1Tn8Hc3Mz6Wd0J")).toBe(false); // pragma: allowlist secret
   });
