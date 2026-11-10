@@ -204,10 +204,15 @@ const SRI_PATTERN = /^sha(?:1|256|384|512)-[A-Za-z0-9+/_-]+={0,2}$/;
 // whole run so a secret glued onto an identifier is still reported.
 const OPENCODE_ID_PATTERN =
   /^(?:ses|msg|prt|per|psv|frm|wrk|evt|sh|cred|pty|con)_[0-9A-Za-z]{26}$/;
+// Shape #5: LLM provider tool-call identifier (Anthropic `toolu_`, Bedrock
+// `toolu_bdrk_`, Vertex `toolu_vrtx_`, OpenAI `call_`): known prefix plus a
+// base-62 suffix. Matched by shape, never by the tool that carries the ID.
+const TOOL_CALL_ID_PATTERN = /^(?:toolu_(?:bdrk_|vrtx_)?|call_)[0-9A-Za-z]{20,40}$/;
 
 /**
  * Returns true when `run` matches one of the anchored allowlist shapes
- * (case-uniform git object id / hash digest, UUID, or SRI hash) and
+ * (case-uniform git object id / hash digest, UUID, SRI hash, opencode
+ * identifier, or LLM tool-call identifier) and
  * should never be reported, regardless of its measured entropy.
  */
 export function isAllowlistedRun(run) {
@@ -215,7 +220,8 @@ export function isAllowlistedRun(run) {
     GIT_OR_DIGEST_HEX_PATTERN.test(run) ||
     UUID_PATTERN.test(run) ||
     SRI_PATTERN.test(run) ||
-    OPENCODE_ID_PATTERN.test(run)
+    OPENCODE_ID_PATTERN.test(run) ||
+    TOOL_CALL_ID_PATTERN.test(run)
   );
 }
 

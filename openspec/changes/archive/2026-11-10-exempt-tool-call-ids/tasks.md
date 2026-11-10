@@ -1,0 +1,3 @@
+- [x] Write failing tests for the three "Exempt Tool-Call Identifiers From Detection" scenarios in `test/entropy-rule.test.js`
+- [x] Add the tool-call identifier shape to `isAllowlistedRun` in `src/entropy-rule.js`
+- [x] Run `npm test`
