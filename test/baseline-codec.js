@@ -1,6 +1,6 @@
 // Shared JSON encode/decode helpers for the refactor-safety baseline (see
 // design.md D8). JSON.stringify silently drops `undefined`-valued
-// properties, which would make `redactSecrets(undefined, ...)` returning
+// properties, which would make `scanAndRedact(undefined, ...)` returning
 // `{ text: undefined, ... }` indistinguishable from a missing field. These
 // helpers round-trip `undefined` through an explicit sentinel object instead.
 

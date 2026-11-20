@@ -1,4 +1,4 @@
-// Deterministic fixture corpus used to prove `scanAndRedact`/`redactSecrets`
+// Deterministic fixture corpus used to prove `scanAndRedact`
 // are behavior-preserving across the refactor in this change (see
 // design.md D8). `REAL_FIXTURE_ENTRIES` scan through the actual secretlint
 // linter (built via `createLinter`) with `ext` fixed per fixture, matching

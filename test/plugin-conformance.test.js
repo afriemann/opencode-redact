@@ -1,83 +1,29 @@
 // spec: openspec/specs/tool-output-redaction/spec.md
 // spec: openspec/specs/user-message-redaction/spec.md
+// spec: openspec/specs/request-payload-redaction/spec.md
 //
-// Layer-2 adapter-conformance suite (design.md D9): drives a shared fixture
-// corpus through a fake V1 host and a fake V2 ctx, asserting the two
-// adapters produce string-identical redacted text, identical annotations,
-// and identical log content — the property that stops the two adapters
-// drifting apart. V2-only shape-specific cases (Content[] walk, tool-error
-// redaction, output fallback), lifecycle, and invariant cases follow.
-import { describe, it, expect, vi } from "vitest";
+// V2 adapter conformance: drives a shared fixture corpus and shape-specific
+// cases through a fake V2 ctx, plus lifecycle and export-surface invariants.
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import PluginV1 from "../src/plugin.v1.js";
 import PluginV2 from "../src/plugin.v2.js";
 import { RULE_FIXTURES } from "./fixtures.js";
+import { setup } from "../src/setup.js";
+import { fakeV2Ctx, loadV2 as loadHost, captureStderr, parseLog } from "./host.js";
 
 const SRC_DIR = fileURLToPath(new URL("../src/", import.meta.url));
 
-function fakeV1Client() {
-  return { app: { log: vi.fn().mockResolvedValue(undefined) } };
-}
-
-/**
- * A fake V2 ctx exposing exactly what setup() touches: tool.hook and
- * session.hook as capturing stubs that record the callback and resolve to
- * a disposable Registration, matching the real `(name, cb) => Promise<Registration>`
- * shape (design.md "Verified platform facts").
- */
-function fakeV2Ctx() {
-  const hooks = { "execute.after": null, prompt: null, context: null, generate: null, compaction: null, title: null };
-  const disposals = {
-    "execute.after": vi.fn().mockResolvedValue(undefined),
-    prompt: vi.fn().mockResolvedValue(undefined),
-    context: vi.fn().mockResolvedValue(undefined),
-    generate: vi.fn().mockResolvedValue(undefined),
-    compaction: vi.fn().mockResolvedValue(undefined),
-    title: vi.fn().mockResolvedValue(undefined),
-  };
-  const ctx = {
-    tool: {
-      hook: vi.fn(async (name, cb) => {
-        hooks[name] = cb;
-        return { dispose: disposals[name] };
-      }),
-    },
-    session: {
-      hook: vi.fn(async (name, cb) => {
-        hooks[name] = cb;
-        return { dispose: disposals[name] };
-      }),
-    },
-  };
-  return { ctx, hooks, disposals };
-}
-
-async function loadV1() {
-  const client = fakeV1Client();
-  const v1Hooks = await PluginV1({ client });
-  return { client, v1Hooks };
-}
+const cleanups = [];
+afterEach(async () => {
+  delete process.env.OPENCODE_REDACT_LOG_LEVEL;
+  while (cleanups.length > 0) await cleanups.pop()();
+});
 
 async function loadV2(testOverrides = {}) {
-  const { ctx, hooks, disposals } = fakeV2Ctx();
-  const cleanup = await PluginV2.setup(ctx, testOverrides);
-  return { ctx, hooks, disposals, cleanup };
-}
-
-/** Captures process.stderr.write for the duration of a callback. */
-async function captureStderr(fn) {
-  const original = process.stderr.write.bind(process.stderr);
-  const lines = [];
-  process.stderr.write = (chunk) => {
-    lines.push(String(chunk));
-    return true;
-  };
-  try {
-    return { result: await fn(), lines };
-  } finally {
-    process.stderr.write = original;
-  }
+  const host = await loadHost(testOverrides);
+  cleanups.push(host.cleanup);
+  return host;
 }
 
 const CLEAN_TEXT = "nothing sensitive at all";
@@ -91,7 +37,6 @@ const STRUCTURED_BRANCHES = [
       return branch;
     },
   },
-  { reason: "budget", create: (secret) => `${"x".repeat(200_000)}${secret}` },
 ];
 const CORPUS = [
   { name: "clean", text: CLEAN_TEXT, expectRedaction: false },
@@ -103,155 +48,83 @@ const CORPUS = [
     .map((f) => ({ name: f.rule, text: `secret=${f.content}`, expectRedaction: true })),
 ];
 
-describe("V1/V2 adapter conformance — tool-output redaction", () => {
+describe("tool-output redaction", () => {
   // spec: openspec/specs/tool-output-redaction/spec.md
-  it("V1 metadata depth skips preserve independent redactions", async () => {
-    const { client, v1Hooks } = await loadV1();
+  it("metadata depth skips preserve independent redactions", async () => {
+    const { hooks } = await loadV2();
     const secret = RULE_FIXTURES[0].content;
     let branch = { note: secret };
     for (let i = 0; i < 128; i += 1) branch = { child: branch };
     const leaf = branch;
     const metadata = { before: secret, branch, after: secret };
-    await v1Hooks["tool.execute.after"]({ tool: "shell" }, { output: CLEAN_TEXT, metadata });
-    expect(metadata.before).toContain("***REDACTED:");
-    expect(metadata.after).toContain("***REDACTED:");
+    const event = { tool: "shell", status: "completed", result: { content: CLEAN_TEXT, metadata } };
+    const { lines } = await captureStderr(() => hooks["execute.after"](event));
+    const redacted = event.result.metadata;
+    expect(redacted.before).toContain("***REDACTED:");
+    expect(redacted.after).toContain("***REDACTED:");
     let deepest = leaf;
     for (let i = 0; i < 128; i += 1) deepest = deepest.child;
     expect(deepest.note).toBe(secret);
-    const logs = client.app.log.mock.calls.map(([entry]) => entry.body);
-    expect(logs.some((entry) => entry.level === "warn" && entry.message.includes("depth"))).toBe(true);
-    expect(logs.some((entry) => entry.message.includes("redacted 2"))).toBe(true);
-    expect(JSON.stringify(logs)).not.toContain(secret);
+    const logs = parseLog(lines);
+    expect(logs.some((entry) => entry.level === "warn" && entry.extra?.reason === "depth")).toBe(true);
+    expect(lines.join("")).not.toContain(secret);
   });
 
   // spec: openspec/specs/tool-output-redaction/spec.md
-  it("V1 metadata scanning is isolated from output failures", async () => {
-    const { client, v1Hooks } = await loadV1();
-    const secret = RULE_FIXTURES[0].content;
-    const metadata = { note: secret };
-    const output = { get output() { throw new Error(secret); }, metadata };
-    await expect(v1Hooks["tool.execute.after"]({ tool: "shell" }, output)).resolves.toBeUndefined();
-    expect(metadata.note).toContain("***REDACTED:");
-    expect(JSON.stringify(client.app.log.mock.calls)).not.toContain(secret);
-  });
-
-  // spec: openspec/specs/tool-output-redaction/spec.md
-  it("V1 metadata redacts own prototype keys without changing prototypes", async () => {
-    const { v1Hooks } = await loadV1();
+  it("metadata redacts own prototype keys without changing prototypes", async () => {
+    const { hooks } = await loadV2();
     const secret = RULE_FIXTURES[0].content;
     const metadata = JSON.parse(JSON.stringify({ ["__proto__"]: secret, nested: { note: secret } }));
-    await v1Hooks["tool.execute.after"]({ tool: "shell" }, { metadata });
-    expect(Object.getPrototypeOf(metadata)).toBe(Object.prototype);
-    expect(Object.hasOwn(metadata, "__proto__")).toBe(true);
-    expect(metadata.__proto__).toContain("***REDACTED:");
-    expect(metadata.nested.note).toContain("***REDACTED:");
+    const event = { tool: "shell", status: "completed", result: { metadata } };
+    await hooks["execute.after"](event);
+    const redacted = event.result.metadata;
+    expect(Object.getPrototypeOf(redacted)).toBe(Object.prototype);
+    expect(Object.hasOwn(redacted, "__proto__")).toBe(true);
+    expect(redacted.__proto__).toContain("***REDACTED:");
+    expect(redacted.nested.note).toContain("***REDACTED:");
   });
+
   for (const fixture of CORPUS) {
-    it(`${fixture.name}: redacted text and log content are identical across V1 and V2`, async () => {
-      const { client, v1Hooks } = await loadV1();
-      const v1Output = { output: fixture.text, metadata: {} };
-      await v1Hooks["tool.execute.after"]({ tool: "bash" }, v1Output);
+    it(`${fixture.name}: tool output is redacted without any model-facing annotation`, async () => {
+      const { hooks } = await loadV2();
+      const event = { tool: "bash", status: "completed", result: { content: fixture.text } };
+      const { lines } = await captureStderr(() => hooks["execute.after"](event));
 
-      const { hooks: v2Hooks } = await loadV2();
-      const v2Event = { tool: "bash", status: "completed", result: { content: fixture.text } };
-      const { lines } = await captureStderr(() => v2Hooks["execute.after"](v2Event));
-
-      expect(v2Event.result.content).toBe(v1Output.output);
-
+      expect(event.result.content).not.toContain("[opencode-redact]");
       if (fixture.expectRedaction) {
-        expect(v1Output.output).toContain("***REDACTED:");
-        expect(client.app.log).toHaveBeenCalled();
-        expect(lines.some((l) => l.includes("[warn]"))).toBe(true);
+        expect(event.result.content).toContain("***REDACTED:");
+        expect(event.result.content).not.toContain(fixture.text.slice("secret=".length));
       } else {
-        expect(v1Output.output).toBe(CLEAN_TEXT);
-        expect(client.app.log).not.toHaveBeenCalled();
-        expect(lines).toEqual([]);
+        expect(event.result.content).toBe(CLEAN_TEXT);
       }
+      expect(lines.join("")).not.toContain(fixture.text);
     });
   }
-  it("V1 tool.execute.after redacts a secret in metadata (parity with V2)", async () => {
-    const { v1Hooks } = await loadV1();
-    const secret = RULE_FIXTURES[0].content;
-    const v1Output = { output: "clean text", metadata: { note: `leak=${secret}` } };
-    await v1Hooks["tool.execute.after"]({ tool: "bash" }, v1Output);
-    expect(v1Output.output).toBe("clean text");
-    expect(v1Output.metadata.note).toContain("***REDACTED:");
-    expect(v1Output.metadata.note).not.toContain(secret);
-  });
 });
 
-describe("V1/V2 adapter conformance — user-message redaction", () => {
+describe("user-message redaction", () => {
   for (const fixture of CORPUS) {
-    it(`${fixture.name}: redacted text and annotation are identical across V1 and V2`, async () => {
-      const { client, v1Hooks } = await loadV1();
-      const part = { type: "text", text: fixture.text };
-      const v1Output = { message: {}, parts: [part] };
-      await v1Hooks["chat.message"]({ sessionID: "s1" }, v1Output);
+    it(`${fixture.name}: prompt text is redacted without any model-facing annotation`, async () => {
+      const { hooks } = await loadV2();
+      const event = { sessionID: "s1", prompt: { text: fixture.text } };
+      await hooks.prompt(event);
 
-      const { hooks: v2Hooks } = await loadV2();
-      const v2Event = { sessionID: "s1", prompt: { text: fixture.text } };
-      const { lines } = await captureStderr(() => v2Hooks.prompt(v2Event));
-
-      expect(v2Event.prompt.text).toBe(part.text);
-
+      expect(event.prompt.text).not.toContain("[opencode-redact]");
       if (fixture.expectRedaction) {
-        expect(part.text).toContain("***REDACTED:");
-        const annotationCount = (part.text.match(/\[opencode-redact\]/g) ?? []).length;
-        expect(annotationCount).toBe(1);
-        expect(client.app.log).toHaveBeenCalled();
-        expect(lines.some((l) => l.includes("[warn]"))).toBe(true);
+        expect(event.prompt.text).toContain("***REDACTED:");
       } else {
-        expect(part.text).toBe(CLEAN_TEXT);
-        expect(client.app.log).not.toHaveBeenCalled();
-        expect(lines).toEqual([]);
+        expect(event.prompt.text).toBe(CLEAN_TEXT);
       }
     });
   }
 
-  it("V2: a noredact-fenced secret is left untouched, matching V1's fence exemption", async () => {
+  it("a noredact-fenced secret is left untouched", async () => {
     const secret = RULE_FIXTURES[0].content;
     const fenced = `\`\`\`noredact\nsecret=${secret}\n\`\`\``;
-
-    const { v1Hooks } = await loadV1();
-    const part = { type: "text", text: fenced };
-    await v1Hooks["chat.message"]({ sessionID: "s1" }, { message: {}, parts: [part] });
-
-    const { hooks: v2Hooks } = await loadV2();
-    const v2Event = { sessionID: "s1", prompt: { text: fenced } };
-    await v2Hooks.prompt(v2Event);
-
-    expect(v2Event.prompt.text).toBe(fenced);
-    expect(part.text).toBe(fenced);
-  });
-
-  it("V2: redaction survives even when the annotation-append write throws (mirrors V1's tested guarantee)", async () => {
-    const secret = RULE_FIXTURES[0].content;
-    const original = `secret=${secret}`;
-    let value = original;
-    let writes = 0;
     const { hooks } = await loadV2();
-    const v2Event = {
-      sessionID: "s1",
-      prompt: {
-        get text() {
-          return value;
-        },
-        set text(v) {
-          writes += 1;
-          if (writes === 2) {
-            throw new Error("second write boom");
-          }
-          value = v;
-        },
-      },
-    };
-
-    await hooks.prompt(v2Event);
-
-    expect(v2Event.prompt.text).toContain("***REDACTED:");
-    expect(v2Event.prompt.text).not.toContain(secret);
-    expect(v2Event.prompt.text).not.toContain("[opencode-redact]");
-    expect(writes).toBe(2);
+    const event = { sessionID: "s1", prompt: { text: fenced } };
+    await hooks.prompt(event);
+    expect(event.prompt.text).toBe(fenced);
   });
 });
 
@@ -310,7 +183,7 @@ describe("V2-only shape-specific cases", () => {
     },
   );
 
-  it("execute.after: Content[] walk redacts text blocks, leaves file blocks untouched, one annotation on the last redacted block", async () => {
+  it("execute.after: Content[] walk redacts text blocks and leaves file blocks untouched", async () => {
     const { hooks } = await loadV2();
     const secretA = RULE_FIXTURES.find((f) => f.rule === "aws").content;
     const secretB = RULE_FIXTURES.find((f) => f.rule === "privatekey").content;
@@ -331,8 +204,7 @@ describe("V2-only shape-specific cases", () => {
     expect(event.result.content[0].text).not.toContain("[opencode-redact]");
     expect(event.result.content[1]).toEqual({ type: "file", uri: "file:///tmp/x", mime: "text/plain" });
     expect(event.result.content[2].text).toContain("***REDACTED:");
-    const annotationCount = (event.result.content[2].text.match(/\[opencode-redact\]/g) ?? []).length;
-    expect(annotationCount).toBe(1);
+    expect(event.result.content[2].text).not.toContain("[opencode-redact]");
   });
 
   it("execute.after: output is redacted only when content is absent and output is a string", async () => {
@@ -359,7 +231,7 @@ describe("V2-only shape-specific cases", () => {
     expect(eventBothPresent.result.output).toBe(`leak=${secret}`);
   });
 
-  it("execute.after: a structured {exit, truncated, output} record's nested output.output string is redacted even when content is also present (real @opencode/cli 2.0.4 shell-tool shape)", async () => {
+  it("A structured output's nested duplicate-text field is scanned: a structured {exit, truncated, output} record's nested output.output string is redacted even when content is also present (real @opencode/cli 2.0.4 shell-tool shape)", async () => {
     // Empirically confirmed shape: the built-in shell tool's result.output
     // is NOT a bare string OR arbitrary opaque data -- it's a structured
     // record duplicating the same raw text content already carries. This
@@ -402,14 +274,14 @@ describe("V2-only shape-specific cases", () => {
     expect(JSON.stringify(event.result.output)).toBe(before);
   });
 
-  it("execute.after: annotates a redaction carried only by a structured output.output (content absent)", async () => {
+  it("execute.after: redacts a secret carried only by a structured output.output (content absent)", async () => {
     const { hooks } = await loadV2();
     const secret = RULE_FIXTURES[0].content;
     const event = { tool: "shell", status: "completed", result: { output: { exit: 0, output: `leak=${secret}` } } };
     await hooks["execute.after"](event);
     expect(event.result.output.output).toContain("***REDACTED:");
     expect(event.result.output.output).not.toContain(secret);
-    expect(event.result.output.output).toContain("[opencode-redact]");
+    expect(event.result.output.output).not.toContain("[opencode-redact]");
   });
 
   it("execute.after: event.result is replaced wholesale (readonly fields)", async () => {
@@ -476,25 +348,22 @@ describe("V2-only shape-specific cases", () => {
     if (status === "completed") expect(value.note).toBe(secret);
   });
 
-  it.each(["completed", "error"])("An unusually large structured result does not block indefinitely (%s)", async (status) => {
+  it.each(["completed", "error"])("A very long string leaf is still scanned (%s)", async (status) => {
     const { hooks } = await loadV2();
     const secret = RULE_FIXTURES[0].content;
-    const blob = STRUCTURED_BRANCHES.find((entry) => entry.reason === "budget").create(secret);
-    const value = { blob, duplicate: blob, note: `leak=${secret}` };
+    const blob = `${"x ".repeat(100_000)}${secret}`;
+    const value = { blob, note: "clean" };
     const error = Object.assign(new Error("tool failed"), value);
     const event = { tool: "bash", status, error, result: { content: CLEAN_TEXT, metadata: value } };
     const { lines } = await captureStderr(() => hooks["execute.after"](event));
     const scanned = status === "error" ? event.error : event.result.metadata;
-    expect(scanned.blob).toBe(blob);
-    expect(scanned.duplicate).toBe(blob);
-    expect(scanned.note).toContain("***REDACTED:");
-    expect(scanned.note).not.toContain(secret);
-    expect(lines.filter((line) => line.includes("skipped") && line.includes("budget"))).toHaveLength(1);
+    expect(scanned.blob).toContain("***REDACTED:");
+    expect(scanned.blob).not.toContain(secret);
+    expect(lines.filter((line) => line.includes("skipped"))).toEqual([]);
     expect(lines.join("")).not.toContain(secret);
-    if (status === "error") expect(event.error).toBe(error);
   });
 
-  it.each(STRUCTURED_BRANCHES.filter((entry) => entry.reason !== "budget").flatMap((entry) =>
+  it.each(STRUCTURED_BRANCHES.flatMap((entry) =>
     ["completed", "error"].map((status) => ({ ...entry, status }))))(
     "Cyclic and deep structured branches are skipped independently ($reason, $status)", async ({ reason, create, status }) => {
       const { hooks } = await loadV2();
@@ -531,10 +400,10 @@ describe("V2-only shape-specific cases — session context/generate/compaction h
   });
 
   // spec: openspec/specs/request-payload-redaction/spec.md
-  it.each(["characters", "visits"])("Structured history budgets are shared across the request", async (limit) => {
+  it("Structured history budgets are shared across the request", async () => {
     const { hooks } = await loadV2();
     const secret = RULE_FIXTURES[0].content;
-    const first = limit === "characters" ? "x".repeat(200_000) : Array(9999).fill(null);
+    const first = Array(9999).fill(null);
     const original = { type: "tool-result", result: { type: "json", value: { note: secret } } };
     const event = { system: [], messages: [
       { role: "assistant", content: [{ type: "tool-call", input: first }] },
@@ -543,8 +412,7 @@ describe("V2-only shape-specific cases — session context/generate/compaction h
     const { lines } = await captureStderr(() => hooks.context(event));
     expect(event.messages[1].content[0]).toBe(original);
     expect(original.result.value.note).toBe(secret);
-    const reason = limit === "characters" ? "budget" : "visits";
-    expect(lines.filter((line) => line.includes("skipped") && line.includes(reason))).toHaveLength(1);
+    expect(lines.filter((line) => line.includes("skipped") && line.includes("visits"))).toHaveLength(1);
     expect(lines.join("")).not.toContain(secret);
     const fresh = { system: [], messages: [{ role: "tool", content: [original] }] };
     await hooks.context(fresh);
@@ -559,21 +427,17 @@ describe("V2-only shape-specific cases — session context/generate/compaction h
   });
 
   for (const name of HOOK_NAMES) {
-    it.each([false, true])(`${name}: Structured history traversal uses observable bounds (string input, oversized=%s)`, async (oversized) => {
+    it.each([false, true])(`${name}: A string tool-call input is scanned whatever its length (long=%s)`, async (long) => {
       const { hooks } = await loadV2();
       const secret = RULE_FIXTURES[0].content;
-      const input = oversized ? "x".repeat(200_000) + secret : secret;
+      const input = long ? `${"x ".repeat(100_000)}${secret}` : secret;
       const original = { type: "tool-call", input };
       const event = { system: [], messages: [{ role: "assistant", content: [original] }] };
       const { lines } = await captureStderr(() => hooks[name](event));
       const scanned = event.messages[0].content[0];
-      if (oversized) {
-        expect(scanned).toBe(original);
-        expect(lines.some((line) => line.includes("skipped") && line.includes("budget"))).toBe(true);
-      } else {
-        expect(scanned.input).toContain("***REDACTED:");
-        expect(scanned.input).not.toContain(secret);
-      }
+      expect(scanned.input).toContain("***REDACTED:");
+      expect(scanned.input).not.toContain(secret);
+      expect(lines.some((line) => line.includes("skipped"))).toBe(false);
       expect(original.input).toBe(input);
     });
 
@@ -643,7 +507,7 @@ describe("V2-only shape-specific cases — session context/generate/compaction h
       const { lines } = await captureStderr(() => hooks[name](event));
       expect(event.messages.at(-1).content[0].text).toContain("***REDACTED:");
       expect(event.messages.at(-1).content[0].text).not.toContain(secret);
-      expect(lines.some((line) => line.includes("[error]"))).toBe(true);
+      expect(parseLog(lines).some((entry) => entry.level === "error")).toBe(true);
       expect(lines.join("")).not.toContain(secret);
     });
 
@@ -684,8 +548,7 @@ describe("V2-only shape-specific cases — session context/generate/compaction h
       await hooks[name](event);
       expect(event.system[0].text).toContain("***REDACTED:");
       expect(event.system[0].text).not.toContain(secret);
-      const annotationCount = (event.system[0].text.match(/\[opencode-redact\]/g) ?? []).length;
-      expect(annotationCount).toBe(1);
+      expect(event.system[0].text).not.toContain("[opencode-redact]");
     });
 
     it(`${name}: leaves a clean system prompt segment unchanged`, async () => {
@@ -803,7 +666,7 @@ describe("V2-only shape-specific cases — session context/generate/compaction h
     });
 
     // spec: openspec/specs/request-payload-redaction/spec.md
-    it("No text-bearing part to carry the annotation", async () => {
+    it("Tool-call and tool-result redactions are rewritten in place of the value, with no annotation", async () => {
       const { hooks } = await loadV2();
       const secret = RULE_FIXTURES[0].content;
       const event = {
@@ -830,11 +693,10 @@ describe("V2-only shape-specific cases — session context/generate/compaction h
       expect(content[0].input.cmd).not.toContain(secret);
       expect(content[1].result.value.out).toContain("***REDACTED:");
       expect(content[1].result.value.out).not.toContain(secret);
-      // No text-bearing part exists, so no annotation is appended anywhere.
       expect(JSON.stringify(content)).not.toContain("[opencode-redact]");
     });
 
-    it(`${name}: annotates a compaction redaction (a text-bearing part)`, async () => {
+    it(`${name}: redacts a compaction part without annotating it`, async () => {
       const { hooks } = await loadV2();
       const secret = RULE_FIXTURES[0].content;
       const event = {
@@ -846,7 +708,7 @@ describe("V2-only shape-specific cases — session context/generate/compaction h
       const part = event.messages[0].content[0];
       expect(part.text).toContain("***REDACTED:");
       expect(part.text).not.toContain(secret);
-      expect(part.text).toContain("[opencode-redact]");
+      expect(part.text).not.toContain("[opencode-redact]");
     });
 
     it(`${name}: writes only fresh array slots — deep-frozen part objects are never modified`, async () => {
@@ -909,7 +771,7 @@ describe("V2-only shape-specific cases — session context/generate/compaction h
       expect(resultPart.result.value.out).toBe(`leak ${secret}`);
     });
 
-    it(`${name}: leaves media and effort parts untouched`, async () => {
+    it(`Media content is left untouched (${name}: media and effort parts)`, async () => {
       const { hooks } = await loadV2();
       const mediaPart = {
         type: "media",
@@ -926,7 +788,7 @@ describe("V2-only shape-specific cases — session context/generate/compaction h
       expect(event.messages[0].content[1]).toBe(effortPart);
     });
 
-    it(`${name}: one annotation for multiple redactions in the system prompt`, async () => {
+    it(`${name}: multiple redactions in the system prompt carry no annotation`, async () => {
       const { hooks } = await loadV2();
       const secretA = RULE_FIXTURES.find((f) => f.rule === "aws").content;
       const secretB = RULE_FIXTURES.find((f) => f.rule === "privatekey").content;
@@ -939,12 +801,9 @@ describe("V2-only shape-specific cases — session context/generate/compaction h
         messages: [],
       };
       await hooks[name](event);
-      expect(event.system[0].text).not.toContain("[opencode-redact]");
-      expect(event.system[1].text).toContain("[opencode-redact]");
-      const totalAnnotations =
-        (event.system[0].text.match(/\[opencode-redact\]/g) ?? []).length +
-        (event.system[1].text.match(/\[opencode-redact\]/g) ?? []).length;
-      expect(totalAnnotations).toBe(1);
+      expect(event.system[0].text).toContain("***REDACTED:");
+      expect(event.system[1].text).toContain("***REDACTED:");
+      expect(JSON.stringify(event.system)).not.toContain("[opencode-redact]");
     });
 
     it(`${name}: no annotation when no redaction occurred`, async () => {
@@ -967,7 +826,7 @@ describe("V2 user-role noredact request rescans", () => {
   const secondSecret = RULE_FIXTURES.find((f) => f.rule === "privatekey").content;
   const fenced = `\`\`\`noredact\n${secret}\n\`\`\``;
   const hookNames = ["context", "generate", "compaction", "title"];
-  // Keep annotation/count assertions independent of overlapping entropy findings.
+  // Keep assertions independent of overlapping entropy findings.
   const testOverrides = { _loadPluginConfigOverride: async () => ({ disableHighEntropy: true }) };
   const textBlock = (text) => ({ type: "text", text });
   const userEvent = (...blocks) => ({ system: [], messages: [{ role: "user", content: blocks }] });
@@ -988,7 +847,7 @@ describe("V2 user-role noredact request rescans", () => {
     await hooks.context(event);
     expect(event.messages[0].content[0].text).toContain(fenced);
     expect(event.messages[0].content[0].text).not.toContain(secondSecret);
-    expect(event.messages[0].content[0].text.match(/\[opencode-redact\]/g)).toHaveLength(2);
+    expect(event.messages[0].content[0].text).not.toContain("[opencode-redact]");
   });
 
   for (const name of hookNames) {
@@ -1002,7 +861,7 @@ describe("V2 user-role noredact request rescans", () => {
         expect(event.messages[0].content[0].text).toBe(fenced);
       });
 
-      it("Mixed user-role blocks retain aggregate annotations", async () => {
+      it("Mixed user-role blocks redact only unfenced text", async () => {
         const { hooks } = await loadV2(testOverrides);
         const nonText = { type: "reasoning", text: secret };
         const blocks = [
@@ -1020,9 +879,8 @@ describe("V2 user-role noredact request rescans", () => {
         expect(content[0].metadata).toEqual({ note: "keep" });
         expect(content[1]).toBe(nonText);
         expect(content[2].text).not.toContain(secondSecret);
-        expect(content[2].text).toContain("2 secret(s)");
-        expect(content[2].text).toContain("rules: aws+privatekey");
-        expect(content[2].text.match(/\[opencode-redact\]/g)).toHaveLength(1);
+        expect(content[2].text).toContain("***REDACTED:");
+        expect(content[2].text).not.toContain("[opencode-redact]");
         expect(content[3].text).toBe(fenced);
       });
 
@@ -1119,9 +977,9 @@ describe("lifecycle", () => {
     const { ctx } = fakeV2Ctx();
     const disposeToolFail = vi.fn().mockRejectedValue(new Error("dispose boom"));
     const disposeSession = vi.fn().mockResolvedValue(undefined);
-    ctx.tool.hook = vi.fn(async (_name, _cb) => ({ dispose: disposeToolFail }));
-    ctx.session.hook = vi.fn(async (_name, _cb) => ({ dispose: disposeSession }));
-    const cleanup = await PluginV2.setup(ctx);
+    ctx.tool.hook = vi.fn(async () => ({ dispose: disposeToolFail }));
+    ctx.session.hook = vi.fn(async () => ({ dispose: disposeSession }));
+    const cleanup = await setup(ctx);
     await cleanup();
     expect(disposeToolFail).toHaveBeenCalled();
     expect(disposeSession).toHaveBeenCalled();
@@ -1133,41 +991,47 @@ describe("lifecycle", () => {
       throw new Error("secretlint preset failed to resolve");
     };
     const { lines } = await captureStderr(() =>
-      expect(PluginV2.setup(ctx, { _createSecretlintConfigOverride: brokenConfig })).rejects.toThrow(
+      expect(setup(ctx, { _createSecretlintConfigOverride: brokenConfig })).rejects.toThrow(
         "secretlint preset failed to resolve",
       ),
     );
-    expect(lines.some((l) => l.includes("[error]") && l.includes("secretlint"))).toBe(true);
+    const entry = parseLog(lines).find((candidate) => candidate.level === "error");
+    expect(entry).toMatchObject({ service: "opencode-redact", extra: { errorClass: "Error" } });
+    expect(lines.join("")).not.toContain("preset failed to resolve");
     // Neither hook was registered -- setup failed before reaching them.
     expect(ctx.tool.hook).not.toHaveBeenCalled();
     expect(ctx.session.hook).not.toHaveBeenCalled();
   });
 });
 
-describe("export-surface invariants (widened to cover plugin.v2.js)", () => {
+describe("export-surface invariants", () => {
   it("plugin.v2.js has only a default export", async () => {
     const mod = await import("../src/plugin.v2.js");
-    const keys = Object.keys(mod).filter((k) => k !== "default");
-    expect(keys).toEqual([]);
+    expect(Object.keys(mod)).toEqual(["default"]);
   });
 
-  it("plugin.v2.js's default export shape is {id, setup}, not a Plugin.define(...) call result requiring a runtime import", () => {
-    expect(PluginV2).toHaveProperty("id");
+  it("the default export is a Plugin.define result with an id and a setup function", async () => {
+    const { Plugin } = await import("@opencode/plugin");
+    expect(PluginV2.id).toBe("opencode-redact");
     expect(typeof PluginV2.setup).toBe("function");
+    const obj = { id: "x", setup: () => {} };
+    expect(Plugin.define(obj)).toBe(obj);
   });
 
-  it("no src file runtime-imports @opencode/plugin or @opencode-ai/plugin (design.md D1/D7)", () => {
+  it("the host-facing setup ignores any second argument", async () => {
+    const { ctx } = fakeV2Ctx();
+    const broken = async () => {
+      throw new Error("override must not be used");
+    };
+    const cleanup = await PluginV2.setup(ctx, { _createSecretlintConfigOverride: broken });
+    await cleanup();
+  });
+
+  it("no V1 runtime remains in src", () => {
     for (const file of readdirSync(SRC_DIR)) {
       if (!file.endsWith(".js")) continue;
       const source = readFileSync(new URL(file, `file://${SRC_DIR}`), "utf8");
-      const hasRuntimeImport = /^\s*import\s.*@opencode(-ai)?\/plugin/m.test(source);
-      expect(hasRuntimeImport, `${file} must not have a runtime import of an opencode plugin SDK`).toBe(false);
+      expect(source, `${file} must not reference the V1 SDK`).not.toContain("@opencode-ai/plugin");
     }
-  });
-
-  it("D1 tripwire: Plugin.define is a verified identity function (test-only import of the devDependency)", async () => {
-    const { Plugin } = await import("@opencode/plugin");
-    const obj = { id: "x", setup: () => {} };
-    expect(Plugin.define(obj)).toBe(obj);
   });
 });

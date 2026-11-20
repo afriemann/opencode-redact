@@ -2,6 +2,7 @@ import { loadPackagesFromConfigDescriptor } from "@secretlint/config-loader";
 import { lintSource } from "@secretlint/core";
 import { looksLikeSecret } from "./prescreen.js";
 import { creator as entropyRuleCreator } from "./entropy-rule.js";
+import { planSlices, yieldToEventLoop, DEFAULT_SLICE_CHARS, DEFAULT_OVERLAP_CHARS } from "./slicing.js";
 
 // Fixed configuration: the recommend preset with the filter-comments rule
 // disabled, so a `secretlint-disable` string embedded in untrusted scanned
@@ -41,7 +42,7 @@ const VIRTUAL_PATH_BASE = "/dev/null/opencode-redact/tool-output";
  * bundle — see design.md D6) — without this, a leaked GCP service-account
  * JSON would never be detected, because the fixed default ext is ".txt".
  */
-function detectExt(text) {
+export function detectExt(text) {
   try {
     const parsed = JSON.parse(text);
     if (parsed !== null && typeof parsed === "object") {
@@ -58,7 +59,7 @@ const DEFAULT_TIMEOUT_MS = 3000;
 /**
  * Returns a bound linter function `(text, opts?) => Promise<Message[]>`
  * that scans `text` against `config` with a wall-clock timeout race. A
- * timeout rejects with a distinguishable error; the caller (redactSecrets)
+ * timeout rejects with a distinguishable error; the caller (scanAndRedact)
  * treats any rejection — timeout or scanner error alike — as fail-open.
  *
  * `opts.ext` overrides ext detection (used by tests to exercise a specific
@@ -128,27 +129,56 @@ export function createEntropyConfig() {
  *   only pass one argument keep working unchanged.
  */
 export function createCompositeLinter(presetConfig, options = {}) {
-  const { disableHighEntropy = false, timeoutMs, _lintSourceOverride } = options;
+  const {
+    disableHighEntropy = false,
+    timeoutMs,
+    _lintSourceOverride,
+    sliceChars = DEFAULT_SLICE_CHARS,
+    overlapChars = DEFAULT_OVERLAP_CHARS,
+  } = options;
 
   const presetLint = createLinter(presetConfig, { timeoutMs, _lintSourceOverride });
   const entropyLint = disableHighEntropy
     ? null
     : createLinter(createEntropyConfig(), { timeoutMs, _lintSourceOverride });
 
-  return async function lint(text, opts = {}) {
+  async function lintSlice(piece, ext) {
     const messageLists = [];
-
-    if (looksLikeSecret(text)) {
-      messageLists.push(await presetLint(text, opts));
+    if (looksLikeSecret(piece)) {
+      messageLists.push(await presetLint(piece, { ext }));
     }
-
     if (entropyLint) {
-      // Pinned ext: the rule ignores `ext` entirely, and pinning avoids
-      // detectExt's JSON.parse running a second time over the same input
-      // (see design.md D1).
-      messageLists.push(await entropyLint(text, { ext: ".txt" }));
+      // Pinned ext: the rule ignores `ext` entirely.
+      messageLists.push(await entropyLint(piece, { ext: ".txt" }));
+    }
+    return messageLists.flat();
+  }
+
+  /**
+   * Scans `text` in bounded slices, yielding to the event loop between them,
+   * and returns messages with ranges in `text` coordinates. A slice that
+   * fails or times out is skipped and the result is flagged `incomplete`,
+   * so a caller never mistakes it for a clean scan.
+   */
+  return async function lint(text, opts = {}) {
+    const ext = opts.ext ?? detectExt(text);
+    const slices = planSlices(text, { sliceChars, overlapChars });
+    const messages = [];
+    let incomplete = false;
+
+    for (const [index, { start, end }] of slices.entries()) {
+      if (index > 0) await yieldToEventLoop();
+      try {
+        const piece = slices.length === 1 ? text : text.slice(start, end);
+        for (const message of await lintSlice(piece, ext)) {
+          messages.push(start === 0 ? message : { ...message, range: message.range?.map((offset) => offset + start) });
+        }
+      } catch {
+        incomplete = true;
+      }
     }
 
-    return messageLists.flat();
+    if (incomplete) messages.incomplete = true;
+    return messages;
   };
 }

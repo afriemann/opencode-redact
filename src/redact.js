@@ -240,39 +240,20 @@ export function splitNoRedactSegments(text) {
 }
 
 /**
- * Builds the model-facing note appended after redaction, naming the
- * concrete prohibited action (writing a placeholder back) so the model does
- * not corrupt real content on a subsequent write/edit of redacted output.
- */
-export function buildAnnotation(count, ruleIds) {
-  const labels = [...new Set(ruleIds)].sort().join("+");
-  return (
-    `[opencode-redact] ${count} secret(s) in this tool output were detected and replaced ` +
-    `with ***REDACTED:...*** placeholders (rules: ${labels}). A placeholder is NOT the ` +
-    `real value and is NOT part of the underlying file, command output, or response. ` +
-    `Never write, copy, echo, or commit a ***REDACTED:...*** placeholder into a file, ` +
-    `command, or message — doing so would overwrite real content with this marker. ` +
-    `If you need the redacted value, ask the user for it; do not try to recover it.`
-  );
-}
-
-/**
- * Orchestrates the full detect -> merge -> splice pipeline, WITHOUT
- * appending any model-facing annotation. `lint` is injected so this
- * function is testable with a stub and, through the same seam,
- * integration-testable with the real secretlint linter.
+ * Orchestrates the full detect -> merge -> splice pipeline. `lint` is
+ * injected so this function is testable with a stub and, through the same
+ * seam, integration-testable with the real secretlint linter.
  *
- * Returns `{ text, redactionCount, ruleIds }` — `text` is the original
+ * Returns `{ text, redactionCount, ruleIds, ok }` — `text` is the original
  * value unchanged whenever nothing is redacted (including on a scanner
  * error, per the fail-open contract; this may be a non-string value such as
  * `undefined`, which is intentionally returned as-is, not coerced), or the
  * redacted string when at least one finding was merged and spliced.
  *
- * Annotation-free by design: two callers build different annotations on top
- * of this shared core — `redactSecrets` (tool output) and
- * `redactUserMessage` (user messages, which additionally applies the
- * `noredact` fence exemption and aggregates across message parts). See
- * design.md D1.
+ * `ok` is false when the scan did not complete: the linter rejected, or
+ * returned messages flagged `incomplete` (a slice failed). A failed scan
+ * reports `redactionCount: 0` exactly like a clean one, so callers that
+ * cache results must check `ok` rather than infer success from the count.
  *
  * Deliberately does NOT apply the anchor-based prescreen itself (see
  * design.md D2) — `lint` is expected to be a composed linter
@@ -285,45 +266,27 @@ export function buildAnnotation(count, ruleIds) {
  */
 export async function scanAndRedact(text, { lint }) {
   if (typeof text !== "string" || text.length === 0) {
-    return { text, redactionCount: 0, ruleIds: [] };
+    return { text, redactionCount: 0, ruleIds: [], ok: true };
   }
 
   let messages;
   try {
     messages = await lint(text);
   } catch {
-    return { text, redactionCount: 0, ruleIds: [] };
+    return { text, redactionCount: 0, ruleIds: [], ok: false };
   }
 
+  const ok = messages.incomplete !== true;
   const intervals = normalizeRanges(text, messages);
   const merged = mergeIntervals(intervals);
   if (merged.length === 0) {
-    return { text, redactionCount: 0, ruleIds: [] };
+    return { text, redactionCount: 0, ruleIds: [], ok };
   }
 
   const redacted = spliceRedactions(text, merged);
   const ruleIds = [...new Set(merged.flatMap((interval) => [...interval.ruleIds].map(shortRuleId)))];
 
-  return { text: redacted, redactionCount: merged.length, ruleIds };
-}
-
-/**
- * Thin wrapper around `scanAndRedact` for the tool-output redaction path:
- * appends the tool-output annotation after all redaction placeholders when
- * at least one finding was redacted. Behavior-preserving by construction —
- * see the refactor-safety baseline in test/redact-baseline.test.js.
- */
-export async function redactSecrets(text, { lint }) {
-  const result = await scanAndRedact(text, { lint });
-  if (result.redactionCount === 0) {
-    return result;
-  }
-
-  return {
-    text: `${result.text}\n\n${buildAnnotation(result.redactionCount, result.ruleIds)}`,
-    redactionCount: result.redactionCount,
-    ruleIds: result.ruleIds,
-  };
+  return { text: redacted, redactionCount: merged.length, ruleIds, ok };
 }
 
 /**
@@ -331,28 +294,25 @@ export async function redactSecrets(text, { lint }) {
  * part: `splitNoRedactSegments` honors the `noredact` fence, then
  * `scanAndRedact` runs on each non-exempt segment. Exempt segments pass
  * through byte-identical. Results are concatenated in source order;
- * `redactionCount` is summed and `ruleIds` is the de-duplicated, sorted
- * union across all scanned segments.
+ * `redactionCount` is summed, `ruleIds` is the de-duplicated, sorted
+ * union across all scanned segments, and `ok` is true only when every
+ * scanned segment completed.
  *
  * Deliberately does NOT apply a whole-text anchor-based prescreen itself
  * (design.md D2) — same reasoning as `scanAndRedact`: `lint` is expected
  * to be a composed linter that always runs its anchor-free high-entropy
  * bundle, and a prescreen here would suppress that on anchor-negative
  * segments.
- *
- * Deliberately annotation-free (like `scanAndRedact`) — only the
- * `chat.message` hook, which sees every part of a message, can aggregate a
- * single annotation across parts. See `buildUserMessageAnnotation` and
- * design.md D1/D6.
  */
 export async function redactUserMessage(text, { lint }) {
   if (typeof text !== "string" || text.length === 0) {
-    return { text, redactionCount: 0, ruleIds: [] };
+    return { text, redactionCount: 0, ruleIds: [], ok: true };
   }
 
   const segments = splitNoRedactSegments(text);
   const resultParts = [];
   let redactionCount = 0;
+  let ok = true;
   const ruleIdSet = new Set();
 
   for (const segment of segments) {
@@ -363,6 +323,7 @@ export async function redactUserMessage(text, { lint }) {
     const scanned = await scanAndRedact(segment.text, { lint });
     resultParts.push(scanned.text);
     redactionCount += scanned.redactionCount;
+    ok = ok && scanned.ok;
     for (const ruleId of scanned.ruleIds) {
       ruleIdSet.add(ruleId);
     }
@@ -372,30 +333,6 @@ export async function redactUserMessage(text, { lint }) {
     text: resultParts.join(""),
     redactionCount,
     ruleIds: [...ruleIdSet].sort(),
+    ok,
   };
-}
-
-/**
- * Builds the model-facing note appended once per user message when at
- * least one redaction occurred across its parts. Unlike `buildAnnotation`
- * (tool output, where the model is told to ask the user for the value),
- * this note addresses a redaction of the user's OWN message — re-asking
- * would loop or coach the model toward soliciting a bypass, so it instead
- * instructs the model to say so and stop. Deliberately makes NO mention of
- * the `noredact` fence or any exemption mechanism (design.md's user
- * decision on annotation content) — teaching the model such a convention
- * would teach it a documented bypass of this security control, since
- * `chat.message` also fires for messages the model itself authored (e.g.
- * subagent/task-tool prompts).
- */
-export function buildUserMessageAnnotation(count, ruleIds) {
-  const labels = [...new Set(ruleIds)].sort().join("+");
-  return (
-    `[opencode-redact] ${count} secret(s) in this user message were detected and replaced ` +
-    `with ***REDACTED:...*** placeholders (rules: ${labels}). A placeholder is NOT the ` +
-    `real value and is NOT part of what the user typed. Never write, copy, echo, or commit ` +
-    `a ***REDACTED:...*** placeholder into a file, command, or message — doing so would ` +
-    `overwrite real content with this marker. Do not attempt to recover, reconstruct, or ` +
-    `guess a redacted value; if the task cannot proceed without it, say so and stop.`
-  );
 }

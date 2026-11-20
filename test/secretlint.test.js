@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createSecretlintConfig, createLinter, createEntropyConfig, createCompositeLinter } from "../src/secretlint.js";
-import { redactSecrets } from "../src/redact.js";
+import { scanAndRedact } from "../src/redact.js";
 import { RULE_FIXTURES } from "./fixtures.js";
 import { ENTROPY_FIXTURES } from "./entropy-fixtures.js";
 
@@ -59,13 +59,13 @@ describe("createLinter", () => {
     await expect(timedOutLint("anything")).rejects.toThrow(/timed out/i);
   });
 
-  it("falls back to the original text end-to-end when createLinter's real timeout rejection reaches redactSecrets", async () => {
+  it("falls back to the original text end-to-end when createLinter's real timeout rejection reaches scanAndRedact", async () => {
     const config = await createSecretlintConfig();
     const neverResolves = () => new Promise(() => {});
     const timedOutLint = createLinter(config, { timeoutMs: 5, _lintSourceOverride: neverResolves });
     const text = "aws_secret_access_key=ZQ7mK4pXvB2nJ8wR5tL9cF3hD6yG1sA0uEZQ7mK4";
-    const result = await redactSecrets(text, { lint: timedOutLint });
-    expect(result).toEqual({ text, redactionCount: 0, ruleIds: [] });
+    const result = await scanAndRedact(text, { lint: timedOutLint });
+    expect(result).toEqual({ text, redactionCount: 0, ruleIds: [], ok: false });
   });
 });
 

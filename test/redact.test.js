@@ -7,11 +7,8 @@ import {
   mergeIntervals,
   spliceRedactions,
   shortRuleId,
-  buildAnnotation,
   scanAndRedact,
-  redactSecrets,
   redactUserMessage,
-  buildUserMessageAnnotation,
 } from "../src/redact.js";
 
 describe("expandToTokenBoundaries", () => {
@@ -165,32 +162,18 @@ describe("shortRuleId", () => {
   });
 });
 
-describe("buildAnnotation", () => {
-  it("mentions the redaction count and deduplicated, sorted rule labels", () => {
-    const annotation = buildAnnotation(2, ["aws", "privatekey", "aws"]);
-    expect(annotation).toContain("2");
-    expect(annotation).toContain("aws+privatekey");
-  });
-
-  it("instructs never to write a placeholder back to a file or message", () => {
-    const annotation = buildAnnotation(1, ["aws"]);
-    expect(annotation.toLowerCase()).toContain("never");
-    expect(annotation).toContain("***REDACTED:");
-  });
-});
-
 describe("scanAndRedact", () => {
   it("returns the input unchanged and never calls lint for an empty string", async () => {
     const lint = vi.fn();
     const result = await scanAndRedact("", { lint });
-    expect(result).toEqual({ text: "", redactionCount: 0, ruleIds: [] });
+    expect(result).toEqual({ text: "", redactionCount: 0, ruleIds: [], ok: true });
     expect(lint).not.toHaveBeenCalled();
   });
 
   it("returns the input unchanged and never calls lint for a non-string value", async () => {
     const lint = vi.fn();
     const result = await scanAndRedact(undefined, { lint });
-    expect(result).toEqual({ text: undefined, redactionCount: 0, ruleIds: [] });
+    expect(result).toEqual({ text: undefined, redactionCount: 0, ruleIds: [], ok: true });
     expect(lint).not.toHaveBeenCalled();
   });
 
@@ -210,68 +193,37 @@ describe("scanAndRedact", () => {
     const lint = vi.fn().mockRejectedValue(new Error("scanner exploded"));
     const text = "aws_secret_access_key=AAAAAAAAAAAAAAAAAAAA";
     const result = await scanAndRedact(text, { lint });
-    expect(result).toEqual({ text, redactionCount: 0, ruleIds: [] });
+    expect(result).toEqual({ text, redactionCount: 0, ruleIds: [], ok: false });
   });
 });
 
-describe("redactSecrets", () => {
-  it("is scanAndRedact plus the tool-output annotation appended after a redaction", async () => {
-    const text = "token: AAAAAAAAAAAAAAAAAAAA secret_value";
-    const start = text.indexOf("AAAAAAAAAAAAAAAAAAAA");
-    const end = start + "AAAAAAAAAAAAAAAAAAAA".length;
-    const lint = vi.fn().mockResolvedValue([{ ruleId: "@secretlint/secretlint-rule-example", range: [start, end] }]);
-    const scanned = await scanAndRedact(text, { lint });
-    const redacted = await redactSecrets(text, { lint });
-    expect(redacted.text).toBe(`${scanned.text}\n\n${buildAnnotation(scanned.redactionCount, scanned.ruleIds)}`);
-    expect(redacted.redactionCount).toBe(scanned.redactionCount);
-    expect(redacted.ruleIds).toEqual(scanned.ruleIds);
-  });
-
-
-  it("returns the input unchanged and never calls lint for an empty string", async () => {
-    const lint = vi.fn();
-    const result = await redactSecrets("", { lint });
-    expect(result).toEqual({ text: "", redactionCount: 0, ruleIds: [] });
-    expect(lint).not.toHaveBeenCalled();
-  });
-
-  it("returns the input unchanged and never calls lint for a non-string value", async () => {
-    const lint = vi.fn();
-    const result = await redactSecrets(undefined, { lint });
-    expect(result).toEqual({ text: undefined, redactionCount: 0, ruleIds: [] });
-    expect(lint).not.toHaveBeenCalled();
-  });
-
-  it("calls lint even for clean, anchor-free text (the anchor prescreen is the injected lint's own responsibility, not scanAndRedact's)", async () => {
+describe("scanAndRedact completion", () => {
+  it("calls lint even for clean, anchor-free text (the anchor prescreen is the injected lint's own responsibility)", async () => {
     const lint = vi.fn().mockResolvedValue([]);
     const text = "the quick brown fox jumps over the lazy dog";
-    const result = await redactSecrets(text, { lint });
-    expect(result).toEqual({ text, redactionCount: 0, ruleIds: [] });
+    const result = await scanAndRedact(text, { lint });
+    expect(result).toEqual({ text, redactionCount: 0, ruleIds: [], ok: true });
     expect(lint).toHaveBeenCalledWith(text);
   });
 
-  it("returns the original text unchanged when lint throws (fail open)", async () => {
-    const lint = vi.fn().mockRejectedValue(new Error("scanner exploded"));
-    const text = "aws_secret_access_key=ZQ7mK4pXvB2nJ8wR5tL9cF3hD6yG1sA0uEZQ7mK4";
-    const result = await redactSecrets(text, { lint });
-    expect(result).toEqual({ text, redactionCount: 0, ruleIds: [] });
+  it("reports an unfinished scan when the scanner rejects with a timeout-shaped error", async () => {
+    const text = "some text the scanner never finished";
+    const lint = vi.fn().mockRejectedValue(new Error("secretlint scan timed out after 3000ms"));
+    const result = await scanAndRedact(text, { lint });
+    expect(result).toEqual({ text, redactionCount: 0, ruleIds: [], ok: false });
   });
 
-  it("redacts text and appends an annotation when lint reports a finding", async () => {
+  it("reports an unfinished scan when the linter flags its messages incomplete, while still redacting what it found", async () => {
     const text = "token: AAAAAAAAAAAAAAAAAAAA secret_value";
     const start = text.indexOf("AAAAAAAAAAAAAAAAAAAA");
-    const end = start + "AAAAAAAAAAAAAAAAAAAA".length;
-    const lint = vi.fn().mockResolvedValue([
-      { ruleId: "@secretlint/secretlint-rule-example", range: [start, end] },
-    ]);
-    const result = await redactSecrets(text, { lint });
+    const messages = [{ ruleId: "@secretlint/secretlint-rule-example", range: [start, start + 20] }];
+    messages.incomplete = true;
+    const result = await scanAndRedact(text, { lint: vi.fn().mockResolvedValue(messages) });
     expect(result.text).toContain("***REDACTED:example***");
-    expect(result.text).toContain("[opencode-redact]");
-    expect(result.redactionCount).toBe(1);
-    expect(result.ruleIds).toEqual(["example"]);
+    expect(result.ok).toBe(false);
   });
 
-  it("appends the annotation exactly once, after every placeholder, even with multiple findings", async () => {
+  it("redacts two non-overlapping findings", async () => {
     const text = "secret_one=AAAAAAAAAA middle secret_two=BBBBBBBBBB";
     const firstStart = text.indexOf("AAAAAAAAAA");
     const secondStart = text.indexOf("BBBBBBBBBB");
@@ -279,56 +231,22 @@ describe("redactSecrets", () => {
       { ruleId: "@secretlint/secretlint-rule-one", range: [firstStart, firstStart + 10] },
       { ruleId: "@secretlint/secretlint-rule-two", range: [secondStart, secondStart + 10] },
     ]);
-    const result = await redactSecrets(text, { lint });
-    const annotationMatches = result.text.match(/\[opencode-redact\]/g) ?? [];
-    expect(annotationMatches).toHaveLength(1);
-    const annotationIndex = result.text.indexOf("[opencode-redact]");
-    const bodyBeforeAnnotation = result.text.slice(0, annotationIndex);
-    const lastPlaceholderInBody = bodyBeforeAnnotation.lastIndexOf("***REDACTED:");
-    expect(lastPlaceholderInBody).toBeGreaterThanOrEqual(0);
-    expect(annotationIndex).toBeGreaterThan(lastPlaceholderInBody);
-  });
-
-  it("redacts two non-overlapping findings end-to-end through the orchestrator", async () => {
-    const text = "secret_one=AAAAAAAAAA middle secret_two=BBBBBBBBBB";
-    const firstStart = text.indexOf("AAAAAAAAAA");
-    const firstEnd = firstStart + "AAAAAAAAAA".length;
-    const secondStart = text.indexOf("BBBBBBBBBB");
-    const secondEnd = secondStart + "BBBBBBBBBB".length;
-    const lint = vi.fn().mockResolvedValue([
-      { ruleId: "@secretlint/secretlint-rule-one", range: [firstStart, firstEnd] },
-      { ruleId: "@secretlint/secretlint-rule-two", range: [secondStart, secondEnd] },
-    ]);
-    const result = await redactSecrets(text, { lint });
+    const result = await scanAndRedact(text, { lint });
     expect(result.text).toContain("***REDACTED:one*** middle ***REDACTED:two***");
     expect(result.redactionCount).toBe(2);
     expect(result.ruleIds.sort()).toEqual(["one", "two"]);
   });
 
-  it("merges two overlapping findings into a single placeholder end-to-end through the orchestrator", async () => {
+  it("merges two overlapping findings into a single placeholder", async () => {
     const text = "secret_value=XXXXXXXXXXXXXXXXXXXX";
     const tokenStart = text.indexOf("XXXXXXXXXXXXXXXXXXXX");
     const lint = vi.fn().mockResolvedValue([
       { ruleId: "@secretlint/secretlint-rule-aws", range: [tokenStart, tokenStart + 12] },
       { ruleId: "@secretlint/secretlint-rule-privatekey", range: [tokenStart + 8, tokenStart + 20] },
     ]);
-    const result = await redactSecrets(text, { lint });
+    const result = await scanAndRedact(text, { lint });
     expect(result.text).toContain("***REDACTED:aws+privatekey***");
     expect(result.redactionCount).toBe(1);
-  });
-
-  it("returns the original text unchanged when the scanner rejects with a timeout-shaped error", async () => {
-    const text = "aws_secret_access_key=ZQ7mK4pXvB2nJ8wR5tL9cF3hD6yG1sA0uEZQ7mK4";
-    const lint = vi.fn().mockRejectedValue(new Error("secretlint scan timed out after 3000ms"));
-    const result = await redactSecrets(text, { lint });
-    expect(result).toEqual({ text, redactionCount: 0, ruleIds: [] });
-  });
-
-  it("does not append an annotation when lint reports no findings", async () => {
-    const text = "token: AAAAAAAAAAAAAAAAAAAA secret_value";
-    const lint = vi.fn().mockResolvedValue([]);
-    const result = await redactSecrets(text, { lint });
-    expect(result).toEqual({ text, redactionCount: 0, ruleIds: [] });
   });
 });
 
@@ -336,14 +254,14 @@ describe("redactUserMessage", () => {
   it("returns the input unchanged and never calls lint for an empty string", async () => {
     const lint = vi.fn();
     const result = await redactUserMessage("", { lint });
-    expect(result).toEqual({ text: "", redactionCount: 0, ruleIds: [] });
+    expect(result).toEqual({ text: "", redactionCount: 0, ruleIds: [], ok: true });
     expect(lint).not.toHaveBeenCalled();
   });
 
   it("returns the input unchanged and never calls lint for a non-string value", async () => {
     const lint = vi.fn();
     const result = await redactUserMessage(undefined, { lint });
-    expect(result).toEqual({ text: undefined, redactionCount: 0, ruleIds: [] });
+    expect(result).toEqual({ text: undefined, redactionCount: 0, ruleIds: [], ok: true });
     expect(lint).not.toHaveBeenCalled();
   });
 
@@ -351,7 +269,7 @@ describe("redactUserMessage", () => {
     const lint = vi.fn().mockResolvedValue([]);
     const text = "the quick brown fox jumps over the lazy dog";
     const result = await redactUserMessage(text, { lint });
-    expect(result).toEqual({ text, redactionCount: 0, ruleIds: [] });
+    expect(result).toEqual({ text, redactionCount: 0, ruleIds: [], ok: true });
     expect(lint).toHaveBeenCalledWith(text);
   });
 
@@ -435,32 +353,6 @@ describe("redactUserMessage", () => {
     const text = "aws_secret_access_key=AAAAAAAAAAAAAAAAAAAA";
     const lint = vi.fn().mockRejectedValue(new Error("scanner exploded"));
     const result = await redactUserMessage(text, { lint });
-    expect(result).toEqual({ text, redactionCount: 0, ruleIds: [] });
-  });
-});
-
-describe("buildUserMessageAnnotation", () => {
-  it("mentions the redaction count and deduplicated, sorted rule labels", () => {
-    const annotation = buildUserMessageAnnotation(2, ["aws", "privatekey", "aws"]);
-    expect(annotation).toContain("2");
-    expect(annotation).toContain("aws+privatekey");
-  });
-
-  it("instructs never to write a placeholder back to a file or message, and not to reconstruct the value", () => {
-    const annotation = buildUserMessageAnnotation(1, ["aws"]);
-    expect(annotation.toLowerCase()).toContain("never");
-    expect(annotation.toLowerCase()).toContain("reconstruct");
-    expect(annotation).toContain("***REDACTED:");
-  });
-
-  it("makes no mention of the noredact fence or any exemption mechanism", () => {
-    const annotation = buildUserMessageAnnotation(1, ["aws"]);
-    expect(annotation.toLowerCase()).not.toContain("noredact");
-    expect(annotation.toLowerCase()).not.toContain("fence");
-  });
-
-  it("differs from the tool-output annotation (does not tell the model to ask the user for the value)", () => {
-    const annotation = buildUserMessageAnnotation(1, ["aws"]);
-    expect(annotation.toLowerCase()).not.toContain("ask the user");
+    expect(result).toEqual({ text, redactionCount: 0, ruleIds: [], ok: false });
   });
 });

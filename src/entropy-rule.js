@@ -61,7 +61,63 @@ export function shannonEntropy(text) {
  * within at least one of `spans`.
  */
 function isWithinAnySpan(run, spans) {
-  return spans.some((span) => run.start >= span.start && run.end <= span.end);
+  const { starts, maxEnds } = containmentIndex(spans);
+  const index = lastIndexAtOrBefore(starts, run.start);
+  return index >= 0 && maxEnds[index] >= run.end;
+}
+
+// Span lookups are indexed once per span array so that scoring cost grows
+// with runs * log(spans), not runs * spans. Span arrays are not mutated
+// after their first lookup; the length check guards against a stale index.
+const containmentIndexes = new WeakMap();
+
+function containmentIndex(spans) {
+  const cached = containmentIndexes.get(spans);
+  if (cached !== undefined && cached.length === spans.length) {
+    return cached;
+  }
+  const sorted = [...spans].sort((a, b) => a.start - b.start);
+  const starts = sorted.map((span) => span.start);
+  const maxEnds = [];
+  let maxEnd = -Infinity;
+  for (const span of sorted) {
+    maxEnd = Math.max(maxEnd, span.end);
+    maxEnds.push(maxEnd);
+  }
+  const index = { length: spans.length, starts, maxEnds };
+  containmentIndexes.set(spans, index);
+  return index;
+}
+
+// Index of the last element of ascending `values` that is <= `target`, or -1.
+function lastIndexAtOrBefore(values, target) {
+  let low = 0;
+  let high = values.length - 1;
+  let found = -1;
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    if (values[middle] <= target) {
+      found = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return found;
+}
+
+// Merges overlapping or touching spans into a sorted, disjoint union.
+function mergeSpans(spans) {
+  const merged = [];
+  for (const span of [...spans].sort((a, b) => a.start - b.start)) {
+    const last = merged[merged.length - 1];
+    if (last !== undefined && span.start <= last.end) {
+      last.end = Math.max(last.end, span.end);
+    } else {
+      merged.push({ start: span.start, end: span.end });
+    }
+  }
+  return merged;
 }
 
 /**
@@ -107,14 +163,18 @@ function findNumericSpans(text) {
 
 // Subtract, rather than discard overlapping runs: a token can begin
 // outside an exemption and continue into a URL scheme without a break.
-// Spans must be sorted by start; overlapping spans are supported.
+// Overlapping and unsorted spans are supported.
 function subtractSpans(runs, spans) {
+  const merged = mergeSpans(spans);
+  const ends = merged.map((span) => span.end);
   const fragments = [];
   for (const run of runs) {
     let start = run.start;
-    for (const span of spans) {
-      if (span.end <= start || span.start >= run.end) {
-        continue;
+    // First merged span ending after the run starts.
+    for (let i = lastIndexAtOrBefore(ends, run.start) + 1; i < merged.length; i++) {
+      const span = merged[i];
+      if (span.start >= run.end) {
+        break;
       }
       if (span.start > start) {
         fragments.push({ start, end: span.start, text: run.text.slice(start - run.start, span.start - run.start) });
