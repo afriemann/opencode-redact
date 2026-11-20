@@ -49,7 +49,7 @@ Unknown future part types carrying a string `.text` SHALL receive the same
 role-specific text redaction as a `text` part. Absent or non-object tool
 result values SHALL remain unchanged.
 Structured history follows the plain-object/array boundary in "Handle
-Non-Scannable Output Gracefully". Character and value-visit budgets are shared
+Non-Scannable Structured Output Gracefully". The value-visit budget is shared
 across every structured input and result value within one hook invocation.
 
 #### Scenario: Unknown text-bearing parts retain role-specific fences
@@ -74,21 +74,20 @@ across every structured input and result value within one hook invocation.
 - **WHEN** a message in a re-derived history payload contains a `reasoning`
   part that carries `providerMetadata` proof-of-generation
 - **THEN** the part is left completely unmodified — its text keeps the
-  detected secret and its `providerMetadata` is unchanged — and no
-  annotation is added
+  detected secret and its `providerMetadata` is unchanged
 
 #### Scenario: User-role fences survive each request-assembly stage
 - **WHEN** a primary, auxiliary generation, or compaction request contains a user-role text block with a well-formed `noredact` fence containing a detectable secret
-- **THEN** the entire fenced span, including its delimiters, remains byte-identical and no annotation is added solely for that exempt span
+- **THEN** the entire fenced span, including its delimiters, remains byte-identical
 
 #### Scenario: User-role fences survive chained and repeated rescans
 - **WHEN** the output of incoming-prompt processing containing a fenced secret and surrounding detectable text is passed through primary, auxiliary generation, and compaction request processing and then scanned again
-- **THEN** the fenced span remains byte-identical at every stage, the surrounding secret is redacted, and no new annotation is added when a rescan finds nothing new
+- **THEN** the fenced span remains byte-identical at every stage and the surrounding secret is redacted
 - **AND** a newly introduced secret outside the fence is redacted on a subsequent scan
 
-#### Scenario: Mixed user-role blocks retain aggregate annotations
+#### Scenario: Mixed user-role blocks redact only unfenced text
 - **WHEN** multiple user-role text blocks contain detectable secrets outside valid fences and exempt secrets inside them, alongside non-text content
-- **THEN** only the outside secrets are redacted and counted, exactly one request-stage annotation is appended to the last redacted block, and the exempt spans, non-text content, and other block fields are preserved
+- **THEN** only the outside secrets are redacted, and the exempt spans, non-text content, and other block fields are preserved
 
 #### Scenario: Malformed user-role fences remain scanned
 - **WHEN** a user-role block contains a detectable secret within an invalid opener, an unterminated fence, or a fence with a mismatched closing delimiter
@@ -109,16 +108,16 @@ across every structured input and result value within one hook invocation.
 
 #### Scenario: User-role rescan failures retain fail-open behavior
 - **WHEN** scanning a non-exempt user-role text segment fails or times out
-- **THEN** that segment remains unchanged, valid fenced spans remain unchanged, and the hook resolves without an annotation for the failed scan
+- **THEN** that segment remains unchanged, valid fenced spans remain unchanged, and the hook resolves
 
 #### Scenario: Structured history traversal uses observable bounds
-- **WHEN** a tool-call input or tool-result value contains a cycle, an excessively deep branch, or text beyond the structured scan budget
-- **THEN** traversal follows the bounds and payload-free warnings in "Handle Non-Scannable Output Gracefully", preserves skipped branches, and continues scanning eligible independent siblings and messages while budget remains
+- **WHEN** a tool-call input or tool-result value contains a cycle or an excessively deep branch
+- **THEN** traversal follows the bounds and payload-free warnings in "Handle Non-Scannable Structured Output Gracefully", preserves skipped branches, and continues scanning eligible independent siblings and messages while budget remains
 
 #### Scenario: Structured history budgets are shared across the request
-- **WHEN** earlier structured inputs or results exhaust the character or value-visit budget
-- **THEN** later structured parts remain unchanged and each skip reason is warned once for the hook invocation
-- **AND** a subsequent invocation starts with fresh budgets
+- **WHEN** earlier structured inputs or results exhaust the value-visit budget
+- **THEN** later structured parts remain unchanged and the skip reason is warned once for the hook invocation
+- **AND** a subsequent invocation starts with a fresh budget
 
 #### Scenario: A malformed request container does not suppress later messages
 - **WHEN** processing a system prompt or one message's content throws
@@ -152,33 +151,3 @@ bypass this redaction.
 - **WHEN** a title-generation request carries system or message content
   containing a detectable secret
 - **THEN** that secret is redacted before the request is sent
-
-### Requirement: Annotate On Redaction, Once Per Assembled Container
-The system SHALL append a note when a redaction occurred in an assembled
-system prompt or in a message's content, instructing that a redaction
-placeholder must never be written back to a file, command, or message, and
-SHALL append exactly one such note per container (the system prompt as a
-whole; each message independently) even when multiple segments within that
-same container were redacted. The note SHALL be appended to the last
-redacted part in the container that carries model-facing text (a string
-`.text`); when a container's redactions all occur in parts with no `.text`
-(a `tool-call` part's `input`, a `tool-result` part's `value`), no note can
-be appended because no text-bearing part exists to carry it — the redaction
-SHALL still be counted and reported.
-
-#### Scenario: One annotation for multiple redactions in the system prompt
-- **WHEN** redactions occur in more than one system prompt segment for the
-  same request
-- **THEN** exactly one annotation is appended, reporting the combined count
-  and rule identifiers across every affected segment
-
-#### Scenario: No annotation when no redaction occurred
-- **WHEN** no secret is found in the assembled system prompt or a message's
-  content
-- **THEN** no annotation is appended
-
-#### Scenario: No text-bearing part to carry the annotation
-- **WHEN** a message's only redactions are in `tool-call` inputs or
-  `tool-result` values, so no redacted part carries a `.text`
-- **THEN** the redaction is counted and reported, and no annotation is
-  appended because no text-bearing part exists to carry it

@@ -9,7 +9,7 @@ import { mkdtempSync, writeFileSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { loadPluginConfig, resolveConfigPath, DEFAULT_PLUGIN_CONFIG } from "../src/config.js";
+import { loadPluginConfig, applyPluginOptions, resolveConfigPath, DEFAULT_PLUGIN_CONFIG } from "../src/config.js";
 
 let tmpDir;
 
@@ -73,7 +73,7 @@ describe("loadPluginConfig", () => {
     try {
       const result = await loadPluginConfig({ configPath, log });
       expect(result).toEqual(DEFAULT_PLUGIN_CONFIG);
-      expect(log).toHaveBeenCalledWith("warn", expect.any(String));
+      expect(log).toHaveBeenCalledWith("warn", expect.any(String), { errorCode: expect.any(String) });
     } finally {
       chmodSync(configPath, 0o644);
     }
@@ -108,7 +108,7 @@ describe("loadPluginConfig", () => {
     const log = vi.fn();
     const result = await loadPluginConfig({ configPath, log });
     expect(result).toEqual(DEFAULT_PLUGIN_CONFIG);
-    expect(log).toHaveBeenCalledWith("warn", expect.stringContaining("disableHighEntropy"));
+    expect(log).toHaveBeenCalledWith("warn", expect.any(String), { key: "disableHighEntropy" });
   });
 
   it("still applies a validly-typed known key alongside a wrong-typed one, each independently", async () => {
@@ -119,7 +119,7 @@ describe("loadPluginConfig", () => {
     const log = vi.fn();
     const result = await loadPluginConfig({ configPath, log });
     expect(result).toEqual({ disableHighEntropy: true });
-    expect(log).toHaveBeenCalledWith("warn", expect.stringContaining("someUnknownKey"));
+    expect(log).toHaveBeenCalledWith("warn", expect.any(String), { key: "someUnknownKey" });
   });
 
   it("warns naming an unknown key but does not fail or reset defaults", async () => {
@@ -127,7 +127,7 @@ describe("loadPluginConfig", () => {
     const log = vi.fn();
     const result = await loadPluginConfig({ configPath, log });
     expect(result).toEqual(DEFAULT_PLUGIN_CONFIG);
-    expect(log).toHaveBeenCalledWith("warn", expect.stringContaining("notARealSetting"));
+    expect(log).toHaveBeenCalledWith("warn", expect.any(String), { key: "notARealSetting" });
   });
 
   it("logs one info line and applies the value for a fully valid file", async () => {
@@ -149,14 +149,13 @@ describe("loadPluginConfig", () => {
     expect(result).toEqual({ disableHighEntropy: true });
   });
 
-  it("never includes a configuration value in any log message, only key names", async () => {
+  it("never includes a configuration value in any log entry, only key names", async () => {
     const secretLookingValue = "sk-ant-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
     const configPath = tempConfigPath(`{ "disableHighEntropy": "${secretLookingValue}" }`);
     const log = vi.fn();
     await loadPluginConfig({ configPath, log });
-    for (const [, message] of log.mock.calls) {
-      expect(message).not.toContain(secretLookingValue);
-    }
+    expect(log).toHaveBeenCalled();
+    expect(JSON.stringify(log.mock.calls)).not.toContain(secretLookingValue);
   });
 
   it("never throws or rejects for any malformed input", async () => {
@@ -166,4 +165,54 @@ describe("loadPluginConfig", () => {
       await expect(loadPluginConfig({ configPath, log: vi.fn() })).resolves.toBeTypeOf("object");
     }
   });
+});
+
+describe("applyPluginOptions", () => {
+  it("cannot disable high-entropy detection", () => {
+    const log = vi.fn();
+    const { config, sources } = applyPluginOptions({ ...DEFAULT_PLUGIN_CONFIG }, { disableHighEntropy: true }, log);
+    expect(config.disableHighEntropy).toBe(false);
+    expect(sources.disableHighEntropy).toBe("default");
+    expect(log).toHaveBeenCalledWith("warn", expect.any(String), { key: "disableHighEntropy" });
+  });
+
+  it("can re-enable detection that redact.jsonc disabled", () => {
+    const { config, sources } = applyPluginOptions({ disableHighEntropy: true }, { disableHighEntropy: false });
+    expect(config.disableHighEntropy).toBe(false);
+    expect(sources.disableHighEntropy).toBe("plugin-options");
+  });
+
+  it("reports user-config as the source of a value from redact.jsonc", () => {
+    const { config, sources } = applyPluginOptions({ disableHighEntropy: true }, undefined);
+    expect(config.disableHighEntropy).toBe(true);
+    expect(sources.disableHighEntropy).toBe("user-config");
+  });
+
+  it("ignores an own __proto__ key without throwing", () => {
+    const options = JSON.parse('{"__proto__": true, "disableHighEntropy": true}');
+    expect(() => applyPluginOptions({ ...DEFAULT_PLUGIN_CONFIG }, options)).not.toThrow();
+    expect(applyPluginOptions({ ...DEFAULT_PLUGIN_CONFIG }, options).config.disableHighEntropy).toBe(false);
+  });
+
+  it("bounds the length of a logged unknown key", () => {
+    const log = vi.fn();
+    applyPluginOptions({ ...DEFAULT_PLUGIN_CONFIG }, { ["k".repeat(500)]: 1 }, log);
+    expect(log.mock.calls[0][2].key).toHaveLength(64);
+  });
+
+  it("keeps the settings when reading the options throws", () => {
+    const options = new Proxy({}, { ownKeys() { throw new Error("host proxy"); } });
+    const log = vi.fn();
+    const { config } = applyPluginOptions({ disableHighEntropy: false }, options, log);
+    expect(config.disableHighEntropy).toBe(false);
+    expect(log).toHaveBeenCalledWith("warn", expect.any(String), { errorClass: "Error" });
+  });
+
+  it.each([["wrong type", { disableHighEntropy: "yes" }], ["unknown key", { other: true }], ["array", [1]]])(
+    "ignores an option with %s",
+    (_name, options) => {
+      const { config } = applyPluginOptions({ ...DEFAULT_PLUGIN_CONFIG }, options);
+      expect(config).toEqual(DEFAULT_PLUGIN_CONFIG);
+    },
+  );
 });

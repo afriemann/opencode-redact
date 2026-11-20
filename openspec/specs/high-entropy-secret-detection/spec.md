@@ -3,12 +3,11 @@
 ## Purpose
 Detects secret-shaped substrings that no vendor-pattern rule can catch —
 bespoke or opaque credentials with no known prefix or fixed format — using
-Shannon-entropy scoring, sharing the same scan/merge/splice/annotate
-pipeline that `tool-output-redaction` and `user-message-redaction` already
-specify. This capability adds only the detection-specific behavior; the
-fail-open-on-scanner-error, never-log-matched-values, and
-annotate-on-redaction guarantees are already specified by those two
-capabilities and apply here unchanged.
+Shannon-entropy scoring, sharing the same scan/merge/splice pipeline that
+`tool-output-redaction` and `user-message-redaction` already specify. This
+capability adds only the detection-specific behavior; the
+fail-open-on-scanner-error and never-log-matched-values guarantees are
+already specified by those two capabilities and apply here unchanged.
 
 ## Requirements
 

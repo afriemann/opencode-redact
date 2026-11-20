@@ -1,32 +1,32 @@
 # opencode-redact
 
-An [opencode](https://github.com/anomalyco/opencode) plugin that scans the
-text returned by every successful tool call for secrets and redacts them in
-place — before that output is appended to the LLM's context.
+An [opencode](https://github.com/anomalyco/opencode) V2 plugin that scans
+tool output, user prompts and provider requests for secrets and redacts them
+in place — before that text reaches the LLM.
 
 ## What it does
 
-This plugin registers two hooks. **Tool output** (`tool.execute.after`,
-described here) is scanned unconditionally; **user messages** are scanned by
-a separate hook with a narrower scope and its own exemption mechanism — see
-"User message redaction" below.
+The plugin registers hooks on tool results (`execute.after`), user prompts
+(`prompt`) and every provider request (`context`, `generate`, `compaction`,
+`title`), so a secret is replaced before it reaches the LLM.
 
-- Registers the `tool.execute.after` hook.
-- Scans `output.output` using [secretlint](https://github.com/secretlint/secretlint)'s
+- Scans text with [secretlint](https://github.com/secretlint/secretlint)'s
   recommend rule preset (with the `filter-comments` rule disabled — see
-  "Known limitations" below).
+  "Known limitations" below) plus an entropy check.
 - Replaces each detected secret with a `***REDACTED:<rule>***` placeholder,
   merging overlapping findings and expanding to whitespace boundaries so a
   finding whose reported range only partially covers its secret doesn't leave
   a fragment of it in the output.
-- Appends a short note telling the model a redaction occurred and that it must
-  never write a placeholder back into a file, command, or message.
-- Logs a warning (tool name, redaction count, rule ids only — never the
-  matched secret text or scanner message) when a redaction happens.
-- **Fails open** on a scanner error or timeout — the original output passes
-  through unmodified rather than being blocked or corrupted.
+- Scans inputs of any size: large strings are scanned in bounded, overlapping
+  slices that yield to the event loop, so a large tool result never blocks
+  opencode.
+- Within a session, identical text always redacts identically, so redaction
+  never changes the request prefix between calls.
+- **Fails open** on a scanner error or timeout — the original text passes
+  through unmodified (and is scanned again on its next occurrence) rather
+  than being blocked or corrupted.
 - **Fails loud** at plugin startup if the secretlint rule configuration cannot
-  load — this is the one point where a failure is not silent.
+  load.
 
 <img width="1453" height="657" alt="image" src="https://github.com/user-attachments/assets/ad1235e2-dfd8-4c25-9f6a-db7fc8ec1182" />
 
@@ -37,16 +37,12 @@ rationale.
 
 ## User message redaction
 
-- Registers the `chat.message` hook, which fires when a new message is
-  received — before it reaches the LLM.
-- **Scope: non-synthetic text parts only.** Only parts where
-  `type === "text" && synthetic !== true` are scanned. This deliberately
-  excludes `@`-mentioned file bodies, directory listings, decoded pastes, and
-  subagent/task-tool prompts — all of these arrive as *synthetic* parts, not
-  text the user typed into the composer themselves. Scanning that content is
-  out of scope for v1 (see "Known limitations"); it is unscanned today too, so
-  this is not a regression.
-- Each qualifying part is redacted independently using the same detect →
+- Registers the `prompt` hook, which fires when a new user prompt is
+  admitted — before it is stored or reaches the LLM.
+- **Scope: the prompt text only.** The hook never receives `@`-mentioned
+  file bodies, directory listings, decoded pastes, or synthetic content, so
+  those are not scanned here (see "Known limitations").
+- The prompt text is redacted using the same detect →
   merge → splice pipeline as tool output (`***REDACTED:<rule>***`
   placeholders, merged overlapping findings, token-boundary expansion).
 - **The ` ```noredact ` fence** lets you exempt part of your own message from
@@ -89,20 +85,17 @@ rationale.
     file text, and compaction summaries represented as user-role text also
     receive the exemption. A real secret inside a valid fence in that text
     can reach the model provider; no provenance check is performed.
-- Exactly **one** annotation is appended per message (to the last part that
-  was actually redacted), aggregating the count and rule ids across every
-  redacted part — not one annotation per part. The wording is deliberately
-  different from the tool-output annotation: it tells the model the
-  redaction happened in the user's own message and instructs it to say so and
-  stop rather than try to recover the value (unlike the tool-output note,
-  which says to ask the user for it — here the user already supplied it, and
-  it was redacted on purpose). **The annotation never mentions the
-  `noredact` fence or how it works** — this is intentional: `chat.message`
-  also fires for subagent/task-tool turns, where the "user message" is
-  authored by the parent model, so teaching the fence to the model would
-  teach it a documented way to bypass this security control.
-- Logs a warning (redaction count, rule ids only — never message text) when a
-  redaction happens.
+- **No in-band annotations.** Redacted text carries only the placeholder; the
+  plugin never appends a note to a message or tool output. Instead, the
+  first time it sees a session it adds **one** visible session message
+  explaining that redaction is active and that a `***REDACTED:...***`
+  placeholder is not the real value and must never be written into a file,
+  command, or message. The message is static, adds no counts or rule ids,
+  and is added again once after a compaction. It never mentions the
+  `noredact` fence: the `prompt` hook also fires for subagent/task-tool
+  turns authored by the parent model, so teaching the fence to the model
+  would document a way to bypass this control.
+- Logs one `debug` audit entry per rewritten message (see "Logging").
 - **Fails open**, and **never rejects**, even on an unexpected internal
   error — a rejection from this hook would abort the user's entire turn, not
   just skip redaction, so failures here are always swallowed and logged
@@ -213,59 +206,36 @@ specifically targets this case:
 
 ## Install
 
-Both opencode V1 (`@opencode-ai/plugin`) and V2 (`@opencode/cli` /
-`@opencode/plugin`) are supported, via separate entrypoint files.
-
 ```bash
-npm install
+npm install opencode-redact
 ```
 
-**V1:** symlink the V1 entry file into opencode's plugin directory:
-
-```bash
-ln -s "$(pwd)/src/plugin.v1.js" ~/.config/opencode/plugins/opencode-redact.js
-```
-
-**V2:** OpenCode v2 requires a plugin whose default export is `{ id, setup }`.
-This package's own default export (`.`) is the **V1** adapter, so listing
-`"opencode-redact"` directly in the plugin list does **not** work on v2 — the
-loader rejects the V1 entry with a `PluginModule.LoadError`. Load the `/v2`
-entrypoint explicitly through a one-line shim in an `.opencode/plugins/`
+The package requires opencode V2 (`@opencode/plugin`, peer dependency) and
+Node.js 22.5 or newer. List it by name in the `plugins` array of your opencode
+configuration, or load it through a one-line shim in an `.opencode/plugins/`
 directory (project or global):
 
 ```js
 // .opencode/plugins/opencode-redact.ts
-export { default } from "opencode-redact/v2";             // package in node_modules
+export { default } from "opencode-redact";                 // package in node_modules
 // or, from a local checkout:
 // export { default } from "/abs/path/opencode-redact/src/plugin.v2.js";
 ```
 
-The shim re-exports the real adapter, so its sibling modules (`redact.js`,
-`secretlint.js`, `config.js`) and the `@secretlint/*` dependencies resolve
-from the package's own `node_modules` — do not copy those files next to the
-shim. If you use the config `plugins` array instead, note it accepts package
-names or **directory** targets only; a bare absolute *file* path is rejected
-with `configured plugin path must be a directory`.
-
-Restart opencode. No further configuration is needed — the only setting
-(high-entropy on/off) lives in `redact.jsonc` (see "Configuration").
-
-Unlike some other plugins with a peer dependency on `@opencode-ai/plugin`,
-this plugin needs no additional symlink step for its own dependencies — a
-plain `npm install` inside this repo is sufficient. Neither `@opencode-ai/plugin`
-nor `@opencode/plugin` is ever imported at runtime by either entrypoint —
-see `docs/v2-compat-audit.md` for why.
+Restart opencode. No further configuration is needed (see "Configuration").
+The config `plugins` array accepts package names or **directory** targets
+only; a bare absolute *file* path is rejected. See `docs/v2-compat-audit.md`
+for the host contracts the plugin relies on.
 
 ## Configuration
 
-This plugin has exactly one setting, in v1: whether high-entropy detection
-is on. Everything else — which vendor rules run, thresholds, the allowlist —
-is fixed and not configurable.
+This plugin has exactly one setting: whether high-entropy detection is on.
+Everything else — which vendor rules run, thresholds, the allowlist — is fixed
+and not configurable.
 
 Create `redact.jsonc` (JSON with comments; trailing commas are fine) in
-opencode's own configuration directory — the same directory the `plugins/`
-folder above lives in (`$XDG_CONFIG_HOME/opencode/redact.jsonc`, i.e.
-`~/.config/opencode/redact.jsonc` by default):
+opencode's own configuration directory (`$XDG_CONFIG_HOME/opencode/redact.jsonc`,
+i.e. `~/.config/opencode/redact.jsonc` by default):
 
 ```jsonc
 {
@@ -276,36 +246,42 @@ folder above lives in (`$XDG_CONFIG_HOME/opencode/redact.jsonc`, i.e.
 
 - The file is entirely optional — no file means every default applies
   (high-entropy detection **on**).
-- **Fails open on every problem**, exactly like the rest of this plugin:
-  a missing file is silent; a file that can't be read, doesn't parse as
-  valid JSONC, or has the wrong shape falls back to every default and logs
-  a warning (never the file's actual contents — only key names and error
-  categories are ever logged). This is deliberately the opposite failure
-  direction from the secretlint rule bundle itself, which still fails
-  loud on startup if it can't load — a broken settings file should never
-  cost you detection coverage, but a broken rule bundle should never run
-  silently unprotected.
-- Restart opencode after changing this file — it's read once at plugin
-  startup, not watched for changes.
+- **Plugin options can only tighten.** Options given to the plugin in
+  opencode's `plugins` configuration (`{ "package": "opencode-redact",
+  "options": { "disableHighEntropy": false } }`) can re-enable detection that
+  `redact.jsonc` turned off, but can never disable it: a project-level
+  configuration from an untrusted checkout must not weaken redaction. An
+  option of the wrong type or an unknown key is ignored with a warning.
+- **Fails open on every problem** with the settings file: a missing file is
+  silent; a file that can't be read, doesn't parse as valid JSONC, or has the
+  wrong shape falls back to every default and logs a warning (never the
+  file's contents). This is deliberately the opposite failure direction from
+  the secretlint rule bundle itself, which fails loud on startup if it can't
+  load.
+- Restart opencode after changing configuration — it is read once at plugin
+  startup.
+
+### Logging
+
+Log lines are JSON on stderr: `{"service":"opencode-redact","level":...,
+"message":...,"extra":{...}}`. Variable data is only in `extra`, and an
+error is reported by class and code, never its message. Startup logs the
+plugin version and each resolved setting with its source (`default`,
+`user-config`, or `plugin-options`). Set `OPENCODE_REDACT_LOG_LEVEL` to
+`debug`, `info` (default), `warn`, or `error`. At `debug`, each rewritten
+content item logs one audit entry with its channel and replacement count —
+never content, hashes, or rule text.
 
 ## Rollback / disabling
 
-There is still no way to turn off vendor-pattern detection (the
-`tool.execute.after`/`chat.message` hooks themselves) in v1 — the only
-partial control is `disableHighEntropy` in `redact.jsonc` (see
-"Configuration" above), which turns off just the entropy check. The fast
-"turn everything off" path remains removing the symlink and restarting
-opencode:
-
-```bash
-rm ~/.config/opencode/plugins/opencode-redact.js
-```
+There is no way to turn off vendor-pattern detection — the plugin's hooks are
+always on. The only partial control is `disableHighEntropy` in `redact.jsonc`
+(see "Configuration" above), which turns off just the entropy check. To turn
+everything off, remove the plugin from your opencode configuration (or delete
+the shim in `.opencode/plugins/`) and restart opencode.
 
 ## Known limitations
 
-- **V1 failed tool calls are not scanned.** `tool.execute.after` only fires
-  after a tool call succeeds; error output (e.g. a command's stderr, a stack
-  trace) can still carry a secret to the model unredacted.
 - **Truncated output can spill an unredacted secret to disk.** opencode
   truncates very large tool output to a managed on-disk retention path
   *before* this hook runs; redacting the in-context string does not redact
@@ -325,19 +301,20 @@ rm ~/.config/opencode/plugins/opencode-redact.js
   [Anthropic — extended thinking](https://platform.claude.com/docs/en/build-with-claude/thinking),
   [AWS Bedrock — conversation inference](https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference.html).
 - **Structured V2 scans are bounded and fail open.** Metadata, tool errors,
-  and structured history inputs/results use a 200,000-character scan budget
-  and at most 10,000 value visits per tool-result scan or request-hook invocation,
-  with a maximum of 128 nested containers per path. All structured history
-  inputs/results share the request budget. Oversized
-  string leaves, cyclic back-edges, and deeper branches remain unscanned;
-  secrets there can reach the provider. A payload-free warning reports each
-  skip reason once per tool-result scan or request-hook invocation, while independent siblings remain eligible
-  for scanning until the visit budget is exhausted. String tool-call inputs
-  use the same budget. V1 metadata scanning skips depth 128 with a warning
-  and runs independently of output failures, but has no visit cap.
-  Ordinary text blocks (including text blocks in history result-content values)
-  and duplicate tool-output strings are
-  scanned separately, outside these structured limits.
+  and structured history inputs/results are walked with at most 10,000 value
+  visits per tool-result scan or request-hook invocation, with a maximum of
+  128 nested containers per path. Every string reached is scanned in full
+  (large strings in bounded slices that yield to the event loop). Cyclic
+  back-edges and deeper branches remain unscanned; secrets there can reach
+  the provider. A payload-free warning reports each skip reason once per
+  tool-result scan or request-hook invocation, while independent siblings
+  remain eligible for scanning until the visit budget is exhausted.
+- **Some channels are never scanned.** Provider-signed `reasoning` parts,
+  `media` and `effort` parts, URI `file` blocks in tool results, and
+  `output.attachments` pass through untouched.
+- **A `noredact` fence in user-role text is exempt from scanning.** Subagent
+  prompts authored by a model arrive as user-role text, so a fence there is
+  honoured too (see "User message redaction").
 - **Non-plain structured objects are not cloned or scanned in V2.**
   Copy-on-write traverses only plain objects and arrays. Date, Map, Error,
   and other class instances remain untouched, including secrets in their
@@ -369,11 +346,11 @@ rm ~/.config/opencode/plugins/opencode-redact.js
   that is dense in some *other* way (e.g. a long path or query string with
   no whitespace and none of those delimiter characters) can still expand
   further than the exact secret. This is the safe direction for a security
-  control, and the annotation warns the model not to write the placeholder
-  back.
-- **Configuration is limited to one setting** (`disableHighEntropy` in
-  `redact.jsonc` — see "Configuration" above); no per-rule enable/disable
-  beyond that, no custom allowlist, no threshold tuning.
+  control, and the disclosure message tells the model not to write the
+  placeholder back.
+- **Configuration is limited to one setting** (`disableHighEntropy` — see
+  "Configuration" above); no per-rule enable/disable beyond that, no custom
+  allowlist, no threshold tuning.
 - **Hook ordering relative to other `tool.execute.after` plugins is
   undefined** — opencode runs hooks sequentially in registration order.
 - **Live streaming preview is not redacted.** opencode's `bash` tool
@@ -393,10 +370,10 @@ rm ~/.config/opencode/plugins/opencode-redact.js
   preview during execution is unaffected.
 - **Synthetic content in a user turn is not scanned.** `@`-mentioned file
   bodies, directory listings, decoded pastes, and subagent/task-tool prompts
-  all arrive as *synthetic* parts and are out of scope for the
-  `chat.message` hook (see "User message redaction" above) — a secret
-  pasted via one of those paths is not redacted. This is unscanned today
-  too (no regression); scanning it is deferred to a future change.
+  all arrive as *synthetic* parts and never reach the `prompt` hook (see
+  "User message redaction" above) — a secret pasted via one of those paths
+  is not redacted by that hook. Such content reaches the model through the
+  request hooks, where it is scanned as ordinary message text.
 - **A malformed or unterminated `noredact` fence fails safe by being
   scanned, not exempted.** If you open a fence and never close it, or close
   it with the wrong number of backticks, that content is treated as
@@ -480,12 +457,11 @@ the other, never both by accident:
   identity, and untouched-original tests in
   `test/plugin-conformance.test.js`). The full trace against v2.0.26
   source is in `docs/v2-compat-audit.md`, "V2 content-part and ownership contracts".
-- **`tool.execute.after`.** By upstream hook semantics (V1 parity), the
-  object this hook receives backs the tool's visible result (and, for an
-  error, the execution's `Tool.Error` the host persists). Redacting it
-  therefore rewrites both the provider-bound payload and the tool record —
-  intended: the placeholder the provider sees is the one the record keeps,
-  and the plugin's annotation tells any later reader why.
+- **`tool.execute.after`.** The object this hook receives backs the tool's
+  visible result (and, for an error, the execution's `Tool.Error` the host
+  persists). Redacting it therefore rewrites both the provider-bound payload
+  and the tool record — intended: the placeholder the provider sees is the
+  one the record keeps.
 - **Provider-signed reasoning is untouched on every path.** See
   "Known limitations" above; scanning it requires a provider-compatible
   confidentiality policy and is tracked as a follow-up.
