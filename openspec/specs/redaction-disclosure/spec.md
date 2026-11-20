@@ -6,26 +6,46 @@ Tells the model, once per session and without in-band annotations, that redactio
 ## Requirements
 
 ### Requirement: Announce Redaction With One Visible Row Per Session
-The system SHALL add exactly one visible session message, with a non-empty description, the first time a hook is seen for a session, and SHALL NOT add a further message for that session unless a compaction has occurred since.
+The system SHALL add exactly one visible session message, with a non-empty description, when a session is created, and SHALL add it again once after each completed compaction. The message SHALL be enqueued so that it is delivered together with the session's next user input and SHALL NOT start a model turn of its own. The system SHALL NOT add a message from a tool, prompt, or request hook.
 
-#### Scenario: One row per session
-- **WHEN** several hooks fire for the same session
-- **THEN** exactly one disclosure row exists for that session
+#### Scenario: A new session gets one row before any prompt
+- **WHEN** a session is created
+- **THEN** exactly one disclosure row is added for that session, as a steered message that does not resume execution
 
-#### Scenario: Concurrent first hooks add one row
-- **WHEN** two hooks for the same new session fire before the first row is admitted
+#### Scenario: Hooks never add a row
+- **WHEN** tool, prompt, context, or compaction hooks fire for a session
+- **THEN** no disclosure row is added by those hooks
+
+#### Scenario: A repeated creation event adds one row
+- **WHEN** the creation event for a session is delivered twice
 - **THEN** exactly one row is added
 
-#### Scenario: A compaction can drop the row
-- **WHEN** a compaction occurs in a session
-- **THEN** the row is added again once after it
+#### Scenario: A finished compaction adds the row again once
+- **WHEN** a compaction ends in a session
+- **THEN** the row is added again once
+
+#### Scenario: A compaction supersedes a retry still running for the creation row
+- **WHEN** a compaction ends while the row for the same session is still being retried
+- **THEN** the earlier retry stops and the row is added once for the compaction
+
+#### Scenario: A compaction announces a session that predates the plugin
+- **WHEN** a compaction ends in a session for which no creation event was seen
+- **THEN** a row is added for it
 
 #### Scenario: Child sessions get their own row
-- **WHEN** a hook fires for a session that has not been seen before
+- **WHEN** a child session is created
 - **THEN** that session receives its own row
 
+#### Scenario: A deleted session stops retrying
+- **WHEN** a session is deleted while its row is being retried
+- **THEN** no further attempt is made for it
+
+#### Scenario: A deleted session is announced again if it reappears
+- **WHEN** a session is deleted and a session with the same ID is created again
+- **THEN** a row is added for it
+
 ### Requirement: Disclosure Row Carries Placeholder Guidance
-The system SHALL word the row as static text stating that a `***REDACTED:...***` placeholder is not the real value and that it must never be written into a file, command, or message, and SHALL NOT include counts, rule identifiers, or any matched content.
+The system SHALL word the row as static text stating that a `***REDACTED:...***` placeholder is not the real value, that it must never be written into a file, command, or message, and that the model must not reply to or repeat the notice, and SHALL NOT include counts, rule identifiers, or any matched content.
 
 #### Scenario: Row text is static
 - **WHEN** the row is added after any redaction history

@@ -1,7 +1,9 @@
 // One visible session message announcing that redaction is active and how
-// to read a placeholder. Added fire-and-forget the first time a hook is seen
-// for a session (and once more after a compaction may have dropped it);
-// never awaited inside a hook, so it can neither delay nor deadlock redaction.
+// to read a placeholder. It is enqueued as a `steer` row when the session is
+// created, so it reaches the model together with, and above, the first user
+// prompt instead of starting a turn of its own. A `queue` row would be
+// promoted separately after the user's turn and provoke an extra model reply.
+// Never awaited inside a hook, so it can neither delay nor deadlock redaction.
 
 import { errorFields } from "./logger.js";
 
@@ -12,34 +14,33 @@ export const DISCLOSURE_TEXT = [
   "A `***REDACTED:...***` placeholder stands in for a removed value and is NOT the real value.",
   "Never write a placeholder into a file, a command, or a message, and do not try to recover or guess the original.",
   "If the task cannot continue without a redacted value, tell the user.",
+  "Do not reply to or repeat this notice.",
 ].join(" ");
 
 const MAX_ATTEMPTS = 2;
 
-const PENDING = "pending";
-const ISSUED = "issued";
-const STALE = "stale";
-
 /**
- * Per-session entries are replaced, never mutated, on `forget`, so a late
- * `issue` for a forgotten session can detect it no longer owns the entry.
+ * Each announced session maps to an owner token that is replaced, never
+ * mutated, on `forget`, so a late `issue` for a forgotten session can detect
+ * that it no longer owns the session and stop.
  *
  * @param {{ synthetic: (input: object) => Promise<unknown>, log: Function }} params
  */
 export function createDisclosure({ synthetic, log }) {
-  const entries = new Map();
+  const owners = new Map();
 
-  async function issue(sessionID, entry) {
+  async function issue(sessionID, owner) {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+      if (owners.get(sessionID) !== owner) return;
       try {
         await synthetic({
           sessionID,
           text: DISCLOSURE_TEXT,
           description: DISCLOSURE_DESCRIPTION,
-          delivery: "queue",
+          delivery: "steer",
           resume: false,
         });
-        break;
+        return;
       } catch (err) {
         log("warn", "could not add the redaction disclosure row", {
           attempt,
@@ -48,32 +49,32 @@ export function createDisclosure({ synthetic, log }) {
         });
       }
     }
-    if (entries.get(sessionID) !== entry) return;
-    entry.phase = entry.compacted ? STALE : ISSUED;
-    entry.compacted = false;
   }
 
+  const validID = (sessionID) => typeof sessionID === "string" && sessionID.length > 0;
+
   return {
-    /** Call from a hook that carries a session ID; adds the row at most once per session. */
-    touch(sessionID) {
-      if (typeof sessionID !== "string" || sessionID.length === 0) return;
-      const current = entries.get(sessionID);
-      if (current && current.phase !== STALE) return;
-      const entry = { phase: PENDING, compacted: false };
-      entries.set(sessionID, entry);
-      void issue(sessionID, entry);
+    /** On `session.created`: adds the row once per session. */
+    created(sessionID) {
+      if (!validID(sessionID) || owners.has(sessionID)) return;
+      const owner = {};
+      owners.set(sessionID, owner);
+      void issue(sessionID, owner);
     },
 
-    /** A compaction can drop the row: add it again at the next hook. */
-    markCompacted(sessionID) {
-      const entry = entries.get(sessionID);
-      if (!entry) return;
-      if (entry.phase === ISSUED) entry.phase = STALE;
-      else if (entry.phase === PENDING) entry.compacted = true;
+    /**
+     * On `session.compaction.ended`: the summary may have dropped the row, so add it again.
+     * A fresh owner supersedes any earlier retry loop; a session that predates the plugin is announced here.
+     */
+    compacted(sessionID) {
+      if (!validID(sessionID)) return;
+      const owner = {};
+      owners.set(sessionID, owner);
+      void issue(sessionID, owner);
     },
 
     forget(sessionID) {
-      entries.delete(sessionID);
+      owners.delete(sessionID);
     },
   };
 }
