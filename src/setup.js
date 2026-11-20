@@ -283,6 +283,19 @@ export async function setup(ctx, overrides = {}) {
   };
   const scanFor = (sessionID) => (text, options) => scanner.scan(text, { sessionID, ...options });
 
+  // The host loads this plugin once per location and delivers every session
+  // event to each instance, so only sessions of this instance's location are
+  // announced: those created here, and those whose request hooks fire here
+  // (request hooks run only in the session's own location).
+  const ownSessions = new Set();
+  const redactOwnRequest = (event) => {
+    if (typeof event?.sessionID === "string") ownSessions.add(event.sessionID);
+    return redactRequest(event, { scan: scanFor(event.sessionID), log, audit });
+  };
+  const isLocalCreation = (event) =>
+    event.data?.location?.directory === ctx.location?.directory &&
+    event.data?.location?.workspaceID === ctx.location?.workspaceID;
+
   const registrations = await Promise.all([
     ctx.tool.hook("execute.after", async (event) => {
       try {
@@ -322,12 +335,12 @@ export async function setup(ctx, overrides = {}) {
       }
     }),
 
-    ctx.session.hook("context", (event) => redactRequest(event, { scan: scanFor(event.sessionID), log, audit })),
-    ctx.session.hook("generate", (event) => redactRequest(event, { scan: scanFor(event.sessionID), log, audit })),
-    ctx.session.hook("compaction", (event) => redactRequest(event, { scan: scanFor(event.sessionID), log, audit })),
+    ctx.session.hook("context", redactOwnRequest),
+    ctx.session.hook("generate", redactOwnRequest),
+    ctx.session.hook("compaction", redactOwnRequest),
     // `SessionTitle` is a distinct auxiliary provider request carrying system[]
     // and messages[], so it is redacted independently of the context hook.
-    ctx.session.hook("title", (event) => redactRequest(event, { scan: scanFor(event.sessionID), log, audit })),
+    ctx.session.hook("title", redactOwnRequest),
   ]);
 
   // Session lifecycle: announce redaction when a session is created and again
@@ -338,9 +351,14 @@ export async function setup(ctx, overrides = {}) {
       for await (const event of ctx.event.subscribe({ signal: controller.signal, types: SESSION_EVENTS })) {
         try {
           const sessionID = event?.data?.sessionID;
-          if (event?.type === "session.created") disclosure.created(sessionID);
-          else if (event?.type === "session.compaction.ended") disclosure.compacted(sessionID);
-          else if (event?.type === "session.deleted") {
+          if (event?.type === "session.created") {
+            if (!isLocalCreation(event)) continue;
+            ownSessions.add(sessionID);
+            disclosure.created(sessionID);
+          } else if (event?.type === "session.compaction.ended") {
+            if (ownSessions.has(sessionID)) disclosure.compacted(sessionID);
+          } else if (event?.type === "session.deleted") {
+            ownSessions.delete(sessionID);
             disclosure.forget(sessionID);
             scanner.forget(sessionID);
           }

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DISCLOSURE_DESCRIPTION, DISCLOSURE_TEXT } from "../src/disclosure.js";
 import { ENTROPY_FIXTURES } from "./entropy-fixtures.js";
 import { RULE_FIXTURES } from "./fixtures.js";
-import { captureStderr, loadV2, parseLog } from "./host.js";
+import { LOCAL_DIRECTORY, captureStderr, loadV2, parseLog } from "./host.js";
 
 const aws = RULE_FIXTURES.find((f) => f.rule === "aws");
 
@@ -15,7 +15,11 @@ const completed = (sessionID, content = "clean") => ({
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-const created = (sessionID) => ({ type: "session.created", data: { sessionID } });
+const OTHER_DIRECTORY = "/work/other";
+const created = (sessionID, location = { directory: LOCAL_DIRECTORY }) => ({
+  type: "session.created",
+  data: { sessionID, location },
+});
 const compacted = (sessionID) => ({ type: "session.compaction.ended", data: { sessionID } });
 const deleted = (sessionID) => ({ type: "session.deleted", data: { sessionID } });
 const rowSessions = (ctx) => ctx.session.synthetic.mock.calls.map(([input]) => input.sessionID);
@@ -70,9 +74,29 @@ describe("redaction disclosure", () => {
   });
 
   it("A compaction announces a session that predates the plugin", async () => {
-    const { ctx, emit } = await loadV2();
+    const { ctx, hooks, emit } = await loadV2();
+    await hooks.context({ sessionID: "ses_old", system: [], messages: [] });
     emit(compacted("ses_old"));
     await vi.waitFor(() => expect(rowSessions(ctx)).toEqual(["ses_old"]));
+  });
+
+  it("A session created in another location gets no row", async () => {
+    const { ctx, emit } = await loadV2();
+    emit(created("ses_other_directory", { directory: OTHER_DIRECTORY }));
+    emit(created("ses_other_workspace", { directory: LOCAL_DIRECTORY, workspaceID: "wrk_other" }));
+    emit(created("ses_local"));
+    await vi.waitFor(() => expect(ctx.session.synthetic).toHaveBeenCalledTimes(1));
+    await settle();
+    expect(rowSessions(ctx)).toEqual(["ses_local"]);
+  });
+
+  it("A compaction in a session of another location adds no row", async () => {
+    const { ctx, emit } = await loadV2();
+    emit(compacted("ses_foreign"));
+    emit(created("ses_local"));
+    await vi.waitFor(() => expect(ctx.session.synthetic).toHaveBeenCalledTimes(1));
+    await settle();
+    expect(rowSessions(ctx)).toEqual(["ses_local"]);
   });
 
   it("Child sessions get their own row", async () => {

@@ -6,7 +6,7 @@ Tells the model, once per session and without in-band annotations, that redactio
 ## Requirements
 
 ### Requirement: Announce Redaction With One Visible Row Per Session
-The system SHALL add exactly one visible session message, with a non-empty description, when a session is created, and SHALL add it again once after each completed compaction. The message SHALL be enqueued so that it is delivered together with the session's next user input and SHALL NOT start a model turn of its own. The system SHALL NOT add a message from a tool, prompt, or request hook.
+The system SHALL add exactly one visible session message, with a non-empty description, when a session is created, and SHALL add it again once after each completed compaction. The message SHALL be enqueued so that it is delivered together with the session's next user input and SHALL NOT start a model turn of its own. The system SHALL NOT add a message from a tool, prompt, or request hook. The system SHALL add the message only for sessions that belong to the location the plugin instance was loaded for, so that a host loading the plugin for several locations adds one message per session.
 
 #### Scenario: A new session gets one row before any prompt
 - **WHEN** a session is created
@@ -29,8 +29,16 @@ The system SHALL add exactly one visible session message, with a non-empty descr
 - **THEN** the earlier retry stops and the row is added once for the compaction
 
 #### Scenario: A compaction announces a session that predates the plugin
-- **WHEN** a compaction ends in a session for which no creation event was seen
+- **WHEN** a compaction ends in a session for which no creation event was seen but whose request hooks have fired in this location
 - **THEN** a row is added for it
+
+#### Scenario: A session created in another location gets no row
+- **WHEN** a session is created in a location other than the one the plugin instance was loaded for
+- **THEN** this instance adds no row for it
+
+#### Scenario: A compaction in a session of another location adds no row
+- **WHEN** a compaction ends in a session that this instance neither saw created nor saw a request hook fire for
+- **THEN** this instance adds no row for it
 
 #### Scenario: Child sessions get their own row
 - **WHEN** a child session is created

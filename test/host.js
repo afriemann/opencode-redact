@@ -4,6 +4,9 @@
 import { vi } from "vitest";
 import { setup } from "../src/setup.js";
 
+/** The directory the fake instance is loaded for. */
+export const LOCAL_DIRECTORY = "/work/local";
+
 /**
  * A fake V2 ctx. `tool.hook` and `session.hook` capture the callback and
  * resolve to a disposable Registration, matching the real
@@ -21,6 +24,7 @@ export function fakeV2Ctx({ options } = {}) {
   };
   const ctx = {
     app: { name: "opencode", version: "2.0.0-test", channel: "test" },
+    location: { directory: LOCAL_DIRECTORY, workspaceID: undefined },
     options,
     tool: {
       hook: vi.fn(async (name, cb) => {
