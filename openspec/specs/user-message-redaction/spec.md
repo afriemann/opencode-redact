@@ -1,48 +1,20 @@
 # user-message-redaction Specification
 
 ## Purpose
-Scans user-authored chat message text for secrets before it reaches the model or the persisted transcript, using the same detection engine as tool-output redaction, while giving the user a deliberate way to send content they know is safe without triggering a false-positive redaction.
+Scans user-authored prompt text for secrets before it reaches the model or the persisted transcript, using the same detection engine as tool-output redaction, while giving the user a deliberate way to send content they know is safe without triggering a false-positive redaction.
 
 ## Requirements
 
 ### Requirement: Redact Detected Secrets In User Messages
-The system SHALL scan the text of each non-synthetic `text`-type part of an incoming chat message for secrets and replace any detected secret with a `***REDACTED:<rule>***` placeholder, using the same detection, merge, and whitespace-expansion semantics as tool-output redaction.
+The system SHALL scan the text of an incoming user prompt for secrets and replace any detected secret with a `***REDACTED:<rule>***` placeholder, using the same detection, merge, and whitespace-expansion semantics as tool-output redaction.
 
 #### Scenario: Secret detected in a typed message is redacted
-- **WHEN** a chat message contains a non-synthetic text part whose content includes a recognizable secret (e.g. a vendor API token)
-- **THEN** the secret is replaced with a `***REDACTED:<rule>***` placeholder in that part's text before the message is persisted or sent to the model
+- **WHEN** a user prompt's text includes a recognizable secret (e.g. a vendor API token)
+- **THEN** the secret is replaced with a `***REDACTED:<rule>***` placeholder before the prompt is persisted or sent to the model
 
 #### Scenario: Clean message is left unchanged
-- **WHEN** a chat message's non-synthetic text parts contain no detectable secret
-- **THEN** the message parts are left byte-identical to their original content and no annotation is appended
-
-### Requirement: Restrict Scanning To Non-Synthetic Text Parts
-The system SHALL scan only user-authored composer text and SHALL NOT scan
-any host-delivered synthetic content (expanded file mentions, directory
-listings, decoded pastes, subagent/task-tool prompts) or any non-text part,
-regardless of whether the runtime represents an incoming message as a
-discriminated array of typed parts or as a single composer-text string. On
-a runtime whose message-redaction hook boundary is structurally scoped to
-user-authored composer text only (i.e. synthetic content is delivered
-through a separate, differently-shaped channel that this hook never
-receives), that structural scoping itself satisfies this requirement
-without requiring a per-segment synthetic check.
-
-#### Scenario: Synthetic part is not scanned
-- **WHEN** a chat message includes a part with `synthetic === true` whose text contains a detectable secret
-- **THEN** that part's text is left completely unmodified and its content is not counted toward any redaction
-
-#### Scenario: Non-text part is not scanned
-- **WHEN** a chat message includes a part whose `type` is not `"text"` (e.g. a file or reasoning part)
-- **THEN** that part is skipped entirely and never passed to the scanner
-
-#### Scenario: Subagent-authored turn is not scanned
-- **WHEN** a chat message turn originates from a subagent (task-tool) invocation, arriving as a synthetic part
-- **THEN** the hook performs no redaction on that turn
-
-#### Scenario: Composer text is scanned in full on a runtime with no discrete parts array
-- **WHEN** a runtime delivers an incoming user message as a single composer-text string, with synthetic content (if any) delivered through a separate channel this hook does not receive
-- **THEN** the entire composer-text string is scanned for secrets, since the hook boundary itself excludes any content this requirement scopes out
+- **WHEN** a user prompt's text contains no detectable secret
+- **THEN** the prompt text is left byte-identical to its original content
 
 ### Requirement: Exempt Fenced Blocks From Scanning
 The system SHALL treat content inside a well-formed ` ```noredact ` fenced block — an opening line of 0–3 leading spaces, 3 or more backticks, and the case-insensitive token `noredact` as its entire (trimmed) info string, closed by a line of 0–3 leading spaces and exactly the same number of backticks — as exempt from scanning, passing it through byte-identical while still scanning any surrounding text in the same part.
@@ -59,45 +31,12 @@ The system SHALL treat content inside a well-formed ` ```noredact ` fenced block
 - **WHEN** tool output contains a well-formed ` ```noredact ` fenced block
 - **THEN** the fence has no special meaning for tool-output redaction and its content is scanned like any other text
 
-### Requirement: Annotate Model On User Message Redaction
-The system SHALL append exactly one annotation to the message when at least one redaction occurred anywhere in it, reporting the total redaction count and the union of matched rule labels, and SHALL NOT append any annotation when no redaction occurred.
-
-#### Scenario: Single annotation for a multi-part message
-- **WHEN** redactions occur in more than one non-synthetic text part of the same message
-- **THEN** exactly one annotation is appended, reporting the combined total count and the union of rule labels across all affected parts, rather than one annotation per part
-
-#### Scenario: No annotation when nothing is redacted
-- **WHEN** a message's non-synthetic text parts contain no detectable secret
-- **THEN** no annotation is appended anywhere in the message
-
-### Requirement: Annotation Must Not Describe The Exemption Mechanism
-The system SHALL word the user-message annotation so that it never mentions the fenced-block exemption or otherwise describes any means of avoiding scanning.
-
-#### Scenario: Annotation contains no bypass instructions
-- **WHEN** the user-message annotation is appended after a redaction
-- **THEN** its text contains no reference to the `noredact` fence, fenced code blocks, or any other way to exempt content from scanning
-
 ### Requirement: Fail Open On Scanner Error Or Timeout
-The system SHALL leave a part's text unmodified when the underlying scanner errors or times out while processing it, consistent with tool-output redaction's fail-open behavior.
+The system SHALL leave the prompt text unmodified when the underlying scanner errors or times out while processing it, consistent with tool-output redaction's fail-open behavior.
 
 #### Scenario: Scanner error leaves message unmodified
-- **WHEN** the secret scanner throws an error or exceeds its timeout while scanning a non-synthetic text part
-- **THEN** that part's text is left exactly as authored and no annotation is appended for it
-
-### Requirement: Hook Must Never Reject
-The system SHALL ensure the message-redaction hook resolves successfully for every input shape and internal failure, never throwing or returning a rejected promise, so that a redaction failure cannot abort the user's turn.
-
-#### Scenario: Missing or malformed parts array does not abort the turn
-- **WHEN** a runtime delivers messages as a discrete parts array and that array is missing, `null`, or not an array
-- **THEN** the hook returns without modifying anything and without throwing or rejecting
-
-#### Scenario: A single poisoned part does not suppress redaction of others
-- **WHEN** one part in a multi-part message throws while being read or scanned
-- **THEN** that part is left unmodified and every other non-synthetic text part is still scanned and redacted as appropriate
-
-#### Scenario: An internal failure while scanning composer text does not abort the turn
-- **WHEN** a runtime delivers messages as a single composer-text string and an internal failure occurs while scanning or redacting that string
-- **THEN** the hook returns without modifying the message and without throwing or rejecting
+- **WHEN** the secret scanner throws an error or exceeds its timeout while scanning the prompt text
+- **THEN** the prompt text is left exactly as authored
 
 ### Requirement: Never Log Redacted Secret Values
 The system SHALL log only the redaction count and matched rule ids for a user-message redaction event, and SHALL NOT log the message text, the matched secret value, or any scanner-internal message content.
@@ -105,3 +44,21 @@ The system SHALL log only the redaction count and matched rule ids for a user-me
 #### Scenario: Redaction log omits secret content
 - **WHEN** a redaction occurs in a chat message
 - **THEN** the log entry contains only the redaction count and the short rule ids, and never the original or redacted message text
+
+### Requirement: Scan Only User-Authored Prompt Text
+The system SHALL scan the whole text of the incoming prompt and SHALL NOT scan host-delivered synthetic content or non-text content, which the prompt hook never receives.
+
+#### Scenario: Prompt text is scanned in full
+- **WHEN** a user prompt contains a detectable secret anywhere in its text
+- **THEN** the secret is redacted
+
+#### Scenario: Missing or non-string prompt text is ignored
+- **WHEN** the prompt text is absent, empty, or not a string
+- **THEN** the prompt is left unmodified and the scanner is not invoked
+
+### Requirement: Prompt Hook Must Never Reject
+The system SHALL resolve the prompt hook successfully for every input shape and internal failure, so a redaction failure cannot abort the user's turn.
+
+#### Scenario: An internal failure does not abort the turn
+- **WHEN** an internal failure occurs while scanning or rewriting the prompt text
+- **THEN** the hook returns without throwing or rejecting and the prompt is not rewritten with partial content
