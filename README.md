@@ -348,6 +348,10 @@ the shim in `.opencode/plugins/`) and restart opencode.
   further than the exact secret. This is the safe direction for a security
   control, and the disclosure message tells the model not to write the
   placeholder back.
+- **The disclosure row is added when a session is created.** It is a visible
+  message above the first prompt and is added again after each compaction. A
+  session that existed before the plugin loaded gets it at its next
+  compaction instead.
 - **Configuration is limited to one setting** (`disableHighEntropy` — see
   "Configuration" above); no per-rule enable/disable beyond that, no custom
   allowlist, no threshold tuning.

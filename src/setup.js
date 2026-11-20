@@ -11,6 +11,8 @@ import { createDisclosure } from "./disclosure.js";
 import { createLogger, errorFields, SERVICE_NAME } from "./logger.js";
 import { createScanState, redactObjectStrings, redactValueInPlace } from "./structured.js";
 
+const SESSION_EVENTS = ["session.created", "session.compaction.ended", "session.deleted"];
+
 export const PLUGIN_ID = SERVICE_NAME;
 
 const PACKAGE_VERSION = (() => {
@@ -284,7 +286,6 @@ export async function setup(ctx, overrides = {}) {
   const registrations = await Promise.all([
     ctx.tool.hook("execute.after", async (event) => {
       try {
-        disclosure.touch(event.sessionID);
         const scan = scanFor(event.sessionID);
         if (event.status === "error") {
           // `Tool.Error` is a host Schema.Class, so its string leaves are
@@ -307,7 +308,6 @@ export async function setup(ctx, overrides = {}) {
 
     ctx.session.hook("prompt", async (event) => {
       try {
-        disclosure.touch(event?.sessionID);
         const text = event?.prompt?.text;
         if (typeof text !== "string" || text.length === 0) return;
 
@@ -322,28 +322,31 @@ export async function setup(ctx, overrides = {}) {
       }
     }),
 
-    ctx.session.hook("context", (event) => {
-      disclosure.touch(event?.sessionID);
-      return redactRequest(event, { scan: scanFor(event.sessionID), log, audit });
-    }),
+    ctx.session.hook("context", (event) => redactRequest(event, { scan: scanFor(event.sessionID), log, audit })),
     ctx.session.hook("generate", (event) => redactRequest(event, { scan: scanFor(event.sessionID), log, audit })),
-    ctx.session.hook("compaction", (event) => {
-      disclosure.markCompacted(event?.sessionID);
-      return redactRequest(event, { scan: scanFor(event.sessionID), log, audit });
-    }),
+    ctx.session.hook("compaction", (event) => redactRequest(event, { scan: scanFor(event.sessionID), log, audit })),
     // `SessionTitle` is a distinct auxiliary provider request carrying system[]
     // and messages[], so it is redacted independently of the context hook.
     ctx.session.hook("title", (event) => redactRequest(event, { scan: scanFor(event.sessionID), log, audit })),
   ]);
 
-  // Per-session state is released when its session is deleted.
+  // Session lifecycle: announce redaction when a session is created and again
+  // after a compaction; release per-session state when it is deleted.
   const controller = new AbortController();
   void (async () => {
     try {
-      for await (const event of ctx.event.subscribe({ signal: controller.signal, types: ["session.deleted"] })) {
-        const sessionID = event?.data?.sessionID;
-        scanner.forget(sessionID);
-        disclosure.forget(sessionID);
+      for await (const event of ctx.event.subscribe({ signal: controller.signal, types: SESSION_EVENTS })) {
+        try {
+          const sessionID = event?.data?.sessionID;
+          if (event?.type === "session.created") disclosure.created(sessionID);
+          else if (event?.type === "session.compaction.ended") disclosure.compacted(sessionID);
+          else if (event?.type === "session.deleted") {
+            disclosure.forget(sessionID);
+            scanner.forget(sessionID);
+          }
+        } catch (err) {
+          log("warn", "session event handling failed", errorFields(err));
+        }
       }
     } catch (err) {
       if (!controller.signal.aborted) {
